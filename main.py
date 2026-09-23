@@ -239,7 +239,17 @@ def _apply_hover_peek(controller, config, active):
 # ---------------------------------------------------------------------------
 WH_MOUSE_LL = 14
 WM_MOUSEMOVE = 0x0200
-WM_NCMOUSEMOVE = 0x00A0
+
+
+class _MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", wintypes.POINT),
+        ("mouseData", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),  # ULONG_PTR
+    ]
+
 
 _HOOKPROC = ctypes.WINFUNCTYPE(
     ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
@@ -282,8 +292,6 @@ _user32.SetLayeredWindowAttributes.argtypes = [
     wintypes.BYTE,
     wintypes.DWORD,
 ]
-_user32.GetCursorPos.restype = wintypes.BOOL
-_user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
 
 # 全局低层鼠标钩子
 _user32.SetWindowsHookExW.restype = ctypes.c_void_p  # HHOOK
@@ -328,18 +336,13 @@ class MouseHookManager:
             self._hook_id = None
 
     def _proc(self, nCode, wParam, lParam):
-        if (
-            nCode >= 0
-            and wParam in (WM_MOUSEMOVE, WM_NCMOUSEMOVE)
-            and self.controller.immersive
-        ):
-            pt = wintypes.POINT()
-            if _user32.GetCursorPos(ctypes.byref(pt)):
-                _apply_hover_peek(
-                    self.controller,
-                    self.config,
-                    _cursor_inside_window(self.controller, pt.x, pt.y),
-                )
+        if nCode >= 0 and wParam == WM_MOUSEMOVE and self.controller.immersive:
+            data = _MSLLHOOKSTRUCT.from_address(lParam)
+            _apply_hover_peek(
+                self.controller,
+                self.config,
+                _cursor_inside_window(self.controller, data.pt.x, data.pt.y),
+            )
         return _user32.CallNextHookEx(self._hook_id, nCode, wParam, lParam)
 
 
