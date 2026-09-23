@@ -1,7 +1,7 @@
 """
 config.py
 ---------
-应用程序配置管理：默认配置定义、从本地 JSON 加载配置、将配置保存回 JSON 文件。
+应用程序配置管理：默认配置定义、从本地 JSON 加载配置、将配置保存回 JSON 文件
 """
 
 import copy
@@ -11,7 +11,7 @@ import sys
 
 
 def app_dir():
-    """应用根目录：PyInstaller 打包后为 exe 所在目录，源码运行为本文件所在目录。"""
+    """应用根目录：PyInstaller 打包后为 exe 所在目录，源码运行为本文件所在目录"""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
@@ -20,8 +20,8 @@ def app_dir():
 CONFIG_PATH = os.path.join(app_dir(), "config.json")
 
 DEFAULT_CONFIG = {
-    # 应用版本号（GitHub Actions 发布时从此读取，自动加 v 前缀）
-    "version": "1.0.0",
+    # 应用版本号
+    "version": "1.0.1",
     # 全局快捷键
     "hotkeys": {
         "play_pause": "`",  # 播放/暂停切换

@@ -1,18 +1,18 @@
 """
 webview_chrome.py
 -----------------
-注入到网页顶部的覆盖层（提示栏 + 地址栏 + 设置按钮），以及 js_api 桥接对象。
+注入到网页顶部的覆盖层（提示栏 + 地址栏 + 设置按钮），以及 js_api 桥接对象
 
 覆盖层通过 build_chrome_js() 生成一段自包含 JS，在每次页面加载完成后注入；
-注入后页面里会有一个 window.__compassChrome 对象，供 Python 端 hide/show/setHint/setUrl。
-同时重写 window.open 与拦截 <a target="_blank">，强制新链接在当前窗口打开。
+注入后页面里会有一个 window.__compassChrome 对象，供 Python 端 hide/show/setHint/setUrl
+同时重写 window.open 与拦截 <a target="_blank">，强制新链接在当前窗口打开
 """
 
 import json
 
 
 def build_hint_text(hotkeys: dict) -> str:
-    """生成顶部提示栏里的快捷键提示文案。"""
+    """生成顶部提示栏里的快捷键提示文案"""
     return (
         f"{hotkeys['play_pause']} 暂停/继续   "
         f"{hotkeys['seek_backward']}/{hotkeys['seek_forward']} 进度   "
@@ -192,17 +192,17 @@ _CHROME_JS_TEMPLATE = """
 
 
 def build_chrome_js(hint_text: str) -> str:
-    """把提示文案与覆盖层 HTML 注入到 JS 模板，返回可执行的 JS 代码。"""
+    """把提示文案与覆盖层 HTML 注入到 JS 模板，返回可执行的 JS 代码"""
     return _CHROME_JS_TEMPLATE.replace("__HINT__", json.dumps(hint_text)).replace(
         "__HTML__", json.dumps(_CHROME_HTML)
     )
 
 
 class Api:
-    """js_api：JS 通过 window.pywebview.api.* 调用这里的公有方法。
+    """js_api：JS 通过 window.pywebview.api.* 调用这里的公有方法
 
     这些回调运行在 pywebview 的 WinForms/WebView2 线程上，因此只负责把请求
-    转发成 bridge 的 Qt 信号（PySide6 会自动排队投递到 Qt 后台线程）。
+    转发成 bridge 的 Qt 信号（PySide6 会自动排队投递到 Qt 后台线程）
     """
 
     def __init__(self, bridge_getter):

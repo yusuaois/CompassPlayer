@@ -1,10 +1,10 @@
 """
 hotkey_manager.py
 -----------------
-负责全局快捷键监听（基于 keyboard 库的低层 hook），并把按键触发转为 Qt 信号。
+负责全局快捷键监听（基于 keyboard 库的低层 hook），并把按键触发转为 Qt 信号
 
 使用 keyboard.hook 直接按 event.name 匹配按键，比 add_hotkey 的组合匹配更可靠：
-在按住其他键（例如游戏中按住 W 前进）的同时再按下热键也能被监听到。
+在按住其他键（例如游戏中按住 W 前进）的同时再按下热键也能被监听到
 """
 
 import keyboard
@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject, Signal
 
 
 class HotkeyManager(QObject):
-    """全局快捷键管理器：根据配置注册/注销热键，并把每次触发转成 Qt 信号。"""
+    """全局快捷键管理器：根据配置注册/注销热键，并把每次触发转成 Qt 信号"""
 
     play_pause_triggered = Signal()
     seek_backward_triggered = Signal()

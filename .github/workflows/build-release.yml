@@ -37,7 +37,7 @@ jobs:
 
       - name: 🏗️ Build Executable
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name CompassPlayer main.py
+          pyinstaller --noconfirm --onefile --windowed --name CompassPlayer --icon assets/icon.ico main.py
 
       - name: 📁 Assemble Release Folder
         shell: pwsh

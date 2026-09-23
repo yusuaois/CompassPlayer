@@ -1,7 +1,7 @@
 """
 settings_dialog.py
 -------------------
-按键自定义配置弹窗（QDialog）。
+按键自定义配置弹窗（QDialog）
 """
 
 from PySide6.QtCore import Qt, Signal
