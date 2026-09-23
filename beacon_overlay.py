@@ -29,6 +29,7 @@ HANDLE_SIZE = 10  # 缩放手柄边长（像素）
 COLLAPSED_SIZE = 28  # 收起状态下的圆点直径（像素）
 MARKER_SIZE = 28  # 方向标记图片边长（像素）
 MARKER_PATH = os.path.join(config_module.app_dir(), "assets", "pictures", "marker.svg")
+COMPASS_PATH = os.path.join(config_module.app_dir(), "assets", "pictures", "compass.png")
 
 
 class BeaconOverlay(QWidget):
@@ -56,10 +57,6 @@ class BeaconOverlay(QWidget):
         self._active_handle = None  # 当前正在拖动的缩放手柄名称
         self._current_angle = None  # 当前高亮方向角度（0~359），None 表示暂无方向
 
-        self._marker_renderer = None
-        self._marker_pixmap = None
-        self._load_marker()
-
         self.show()
 
     # ------------------------------------------------------------------
@@ -69,19 +66,6 @@ class BeaconOverlay(QWidget):
         self._current_angle = angle
         self.update()
 
-    def _load_marker(self):
-        """加载方向标记图片（SVG 或 PNG），未找到则用绘制兜底"""
-        if not os.path.exists(MARKER_PATH):
-            return
-        ext = os.path.splitext(MARKER_PATH)[1].lower()
-        try:
-            if ext == ".svg":
-                self._marker_renderer = QSvgRenderer(MARKER_PATH)
-            else:
-                self._marker_pixmap = QPixmap(MARKER_PATH)
-        except Exception:  # noqa: BLE001, S110
-            pass
-
     # ------------------------------------------------------------------
     # 绘制
     # ------------------------------------------------------------------
@@ -90,7 +74,7 @@ class BeaconOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         if self._collapsed:
-            self._paint_collapsed(painter)
+            self._paint_compass(painter)
             return
 
         rect = self.rect().adjusted(
@@ -124,14 +108,7 @@ class BeaconOverlay(QWidget):
             target = QRectF(
                 px - MARKER_SIZE / 2, py - MARKER_SIZE / 2, MARKER_SIZE, MARKER_SIZE
             )
-            if self._marker_renderer is not None:
-                self._marker_renderer.render(painter, target)
-            elif self._marker_pixmap is not None:
-                painter.drawPixmap(target.toRect(), self._marker_pixmap)
-            else:
-                painter.setPen(QPen(QColor(255, 255, 255, 230), 2))
-                painter.setBrush(QBrush(QColor(255, 60, 60, 255)))
-                painter.drawEllipse(QPoint(int(px), int(py)), 7, 7)
+            QSvgRenderer(MARKER_PATH).render(painter, target)  # 定位点
 
         # 编辑模式：红色虚线边框 + 四角缩放手柄
         if self._edit_mode:
@@ -144,11 +121,8 @@ class BeaconOverlay(QWidget):
             for handle_rect in self._handle_rects().values():
                 painter.drawRect(handle_rect)
 
-    def _paint_collapsed(self, painter: QPainter):
-        # 收起为一个小红点（无文字）
-        painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
-        painter.setBrush(QBrush(QColor(255, 80, 80, 220)))
-        painter.drawEllipse(self.rect().adjusted(6, 6, -6, -6))
+    def _paint_compass(self, painter: QPainter):
+        painter.drawPixmap(self.rect(), QPixmap(COMPASS_PATH))
 
     # ------------------------------------------------------------------
     # 缩放手柄区域（四个角）
