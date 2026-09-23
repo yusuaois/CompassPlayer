@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec
+
+# 虚拟环境
+env/
+venv/
+.venv/
+
+# 应用运行时数据（含个人 Cookie / 登录态 / 浏览记录，切勿上传）
+webview_profile/
+EBWebView/
+config.json
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+.**/
+!/.github/
