@@ -44,7 +44,7 @@ class HotkeyManager(QObject):
         self._key_to_callback = {}
         for key, callback in bindings:
             if key and key not in self._key_to_callback:
-                self._key_to_callback[key] = callback
+                self._key_to_callback[keyboard.key_to_scan_codes(key)[0]] = callback
         self._install_hook()
 
     def _install_hook(self):
@@ -61,7 +61,7 @@ class HotkeyManager(QObject):
     def _on_event(self, event):
         # 仅在按下时触发一次；按住不放产生的重复 down 事件同样会命中（用于按住连播）
         if event.event_type == keyboard.KEY_DOWN:
-            callback = self._key_to_callback.get(event.name)
+            callback = self._key_to_callback.get(event.scan_code)
             if callback is not None:
                 callback()
 
