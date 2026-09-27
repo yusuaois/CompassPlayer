@@ -1,7 +1,7 @@
 """
 config.py
 ---------
-应用程序配置管理：默认配置定义、从本地 JSON 加载配置、将配置保存回 JSON 文件
+应用程序配置管理：默认配置、JSON 加载 / 保存
 """
 
 import copy
@@ -11,7 +11,7 @@ import sys
 
 
 def app_dir():
-    """应用根目录：PyInstaller 打包后为 exe 所在目录，源码运行为本文件所在目录"""
+    """PyInstaller 打包后为 exe 所在目录，源码运行为本文件所在目录"""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
@@ -20,30 +20,34 @@ def app_dir():
 CONFIG_PATH = os.path.join(app_dir(), "config.json")
 
 DEFAULT_CONFIG = {
-    # 应用版本号
     "version": "1.0.1",
-    # 全局快捷键
     "hotkeys": {
-        "play_pause": "`",  # 播放/暂停切换
-        "seek_backward": "5",  # 视频快退
-        "seek_forward": "6",  # 视频快进
-        "opacity_down": "7",  # 降低窗口透明度
-        "opacity_up": "8",  # 提高窗口透明度
-        "toggle_visibility": "9",  # 显示/隐藏整个悬浮窗
-        "toggle_immersive": "0",  # 切换沉浸模式
+        "play_pause": "`",
+        "seek_backward": "5",
+        "seek_forward": "6",
+        "opacity_down": "7",
+        "opacity_up": "8",
+        "toggle_visibility": "9",
+        "toggle_immersive": "0",
     },
-    # 视频快进/快退幅度（秒）
     "seek_seconds": 5,
-    # 窗口透明度（0.2 ~ 1.0）
     "opacity": 1.0,
     "opacity_step": 0.1,
     "min_opacity": 0.2,
     "max_opacity": 1.0,
-    # 主窗口位置与大小
     "window_geometry": {"x": 200, "y": 200, "width": 800, "height": 500},
-    # 地图信标叠加层：位置与大小
-    "beacon": {"x": 80, "y": 80, "width": 220, "height": 220},
-    # 启动时默认加载的地址
+    # 位置以相对目标窗口宽高的比例存储（不是绝对屏幕坐标）
+    "beacon": {"rel_x": 0.05, "rel_y": 0.05, "width": 220, "height": 220},
+    "danmaku": {
+        "font_scale": 1.0,
+        "opacity": 0.9,
+        "speed": 1.0,
+        "cross_seconds": 8.0,   # 基准过屏时间（秒），实际 = 该值 / speed
+        "max_lanes": 14,
+        "fixed_seconds": 4.0,   # 顶部/底部弹幕停留时间（秒）
+        "display_area": 0.34,   # 滚动/顶部弹幕限定在窗口最上面这一比例区域（1.0=不限）
+        "tick_ms": 8,          # 弹幕动画刷新间隔（毫秒）
+    },
     "start_url": "https://www.bilibili.com",
 }
 

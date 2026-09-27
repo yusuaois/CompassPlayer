@@ -1,18 +1,17 @@
 """
 webview_chrome.py
 -----------------
-注入到网页顶部的覆盖层（提示栏 + 地址栏 + 设置按钮），以及 js_api 桥接对象
+注入到网页顶部的覆盖层（提示栏 + 地址栏 + 选择窗口/地图/弹幕/设置按钮），
+以及 js_api 桥接对象
 
-覆盖层通过 build_chrome_js() 生成一段自包含 JS，在每次页面加载完成后注入；
-注入后页面里会有一个 window.__compassChrome 对象，供 Python 端 hide/show/setHint/setUrl
-同时重写 window.open 与拦截 <a target="_blank">，强制新链接在当前窗口打开
+覆盖层通过 build_chrome_js() 生成自包含 JS，在每次页面加载完成后注入
+"地图"/"弹幕"按钮默认隐藏，点"选择窗口"后才显示
 """
 
 import json
 
 
 def build_hint_text(hotkeys: dict) -> str:
-    """生成顶部提示栏里的快捷键提示文案"""
     return (
         f"{hotkeys['play_pause']} 暂停/继续   "
         f"{hotkeys['seek_backward']}/{hotkeys['seek_forward']} 进度   "
@@ -22,7 +21,6 @@ def build_hint_text(hotkeys: dict) -> str:
     )
 
 
-# 覆盖层 HTML（作为 JS 字符串注入，故用 HTML 实体避免引号/编码问题）
 _CHROME_HTML = """
 <div style="display:flex;align-items:center;gap:6px;padding:2px 8px;background:#181818;color:#ddd;font:11px/1.4 sans-serif;box-sizing:border-box;width:100%;">
   <span id="__cc_hint__" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0;"></span>
@@ -30,6 +28,12 @@ _CHROME_HTML = """
          style="flex:1 1 auto;min-width:0;background:#2b2b2b;color:#00d2ff;border:1px solid #444;border-radius:3px;padding:1px 6px;font-size:11px;"/>
   <button id="__cc_go__"
           style="flex:0 0 auto;background:#00a1d6;color:#fff;border:none;border-radius:3px;padding:1px 8px;cursor:pointer;font-size:11px;">跳转</button>
+  <button id="__cc_pick__" title="选择弹幕/指南针要贴上去的窗口"
+          style="flex:0 0 auto;background:#3a3a3a;color:#fff;border:none;border-radius:3px;padding:1px 8px;cursor:pointer;font-size:11px;">选择窗口</button>
+  <button id="__cc_map__" title="指南针映射：开关"
+          style="display:none;flex:0 0 auto;background:#3a3a3a;color:#fff;border:none;border-radius:3px;padding:1px 8px;cursor:pointer;font-size:11px;">地图</button>
+  <button id="__cc_danmaku__" title="弹幕映射：开关"
+          style="display:none;flex:0 0 auto;background:#3a3a3a;color:#fff;border:none;border-radius:3px;padding:1px 8px;cursor:pointer;font-size:11px;">弹幕</button>
   <button id="__cc_settings__"
           style="flex:0 0 auto;background:#3a3a3a;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:11px;">&#9881;</button>
 </div>
@@ -53,11 +57,11 @@ _CHROME_JS_TEMPLATE = """
     spacer.style.cssText = 'height:' + barHeight + 'px;';
     host.insertBefore(spacer, host.firstChild);
 
-    var TOP_EPS = 4;         // 允许的顶部误差（像素），可调
-    var WIDE_RATIO = 0.5;    // 至少占视口宽度这个比例才算"顶栏"，可调
-    var FORCE_SELECTORS = []; // 通用识别兜不住时的手动补丁，见回复正文
+    var TOP_EPS = 4;
+    var WIDE_RATIO = 0.5;
+    var FORCE_SELECTORS = [];
 
-    var origTop = new Map(); // element -> 原始 top 像素数值，纯 JS 内存持有
+    var origTop = new Map();
 
     function isOwn(el) {
         return !!(el.id && el.id.indexOf('__compass_') === 0);
@@ -152,9 +156,8 @@ _CHROME_JS_TEMPLATE = """
         }
     });
     mo.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
-    setInterval(reconcile, 1500); // 低频轮询兜底
+    setInterval(reconcile, 1500);
 
-    // 以下与本次修复无关，逻辑保持原样：地址栏 / 设置按钮 / hide()-show() 改为单变量开关
     var hintEl = document.getElementById('__cc_hint__');
     var urlEl = document.getElementById('__cc_url__');
     hintEl.textContent = __HINT__;
@@ -167,6 +170,18 @@ _CHROME_JS_TEMPLATE = """
     document.getElementById('__cc_settings__').addEventListener('click', function () {
         window.pywebview.api.open_settings();
     });
+    var pickBtn = document.getElementById('__cc_pick__');
+    var mapBtn = document.getElementById('__cc_map__');
+    var danmakuBtn = document.getElementById('__cc_danmaku__');
+    pickBtn.addEventListener('click', function () {
+        window.pywebview.api.pick_window();
+    });
+    mapBtn.addEventListener('click', function () {
+        window.pywebview.api.toggle_map_mapping();
+    });
+    danmakuBtn.addEventListener('click', function () {
+        window.pywebview.api.toggle_danmaku_mapping();
+    });
     window.__compassChrome = {
         hide: function () {
             bar.style.display = 'none'; spacer.style.display = 'none';
@@ -177,7 +192,21 @@ _CHROME_JS_TEMPLATE = """
             root.style.setProperty('--compass-bar-h', barHeight + 'px');
         },
         setHint: function (t) { hintEl.textContent = t; },
-        setUrl: function (u) { urlEl.value = u; }
+        setUrl: function (u) { urlEl.value = u; },
+        setWindowPicked: function (picked) {
+            mapBtn.style.display = picked ? 'block' : 'none';
+            danmakuBtn.style.display = picked ? 'block' : 'none';
+            if (!picked) {
+                mapBtn.style.background = '#3a3a3a';
+                danmakuBtn.style.background = '#3a3a3a';
+            }
+        },
+        setMapActive: function (active) {
+            mapBtn.style.background = active ? '#00a1d6' : '#3a3a3a';
+        },
+        setDanmakuActive: function (active) {
+            danmakuBtn.style.background = active ? '#00a1d6' : '#3a3a3a';
+        }
     };
     document.addEventListener('click', function (e) {
         var a = e.target && e.target.closest ? e.target.closest('a') : null;
@@ -192,7 +221,6 @@ _CHROME_JS_TEMPLATE = """
 
 
 def build_chrome_js(hint_text: str) -> str:
-    """把提示文案与覆盖层 HTML 注入到 JS 模板，返回可执行的 JS 代码"""
     return _CHROME_JS_TEMPLATE.replace("__HINT__", json.dumps(hint_text)).replace(
         "__HTML__", json.dumps(_CHROME_HTML)
     )
@@ -201,8 +229,7 @@ def build_chrome_js(hint_text: str) -> str:
 class Api:
     """js_api：JS 通过 window.pywebview.api.* 调用这里的公有方法
 
-    这些回调运行在 pywebview 的 WinForms/WebView2 线程上，因此只负责把请求
-    转发成 bridge 的 Qt 信号（PySide6 会自动排队投递到 Qt 后台线程）
+    回调运行在 pywebview 的 WebView2 线程上，仅转发为 bridge 的 Qt 信号
     """
 
     def __init__(self, bridge_getter):
@@ -222,3 +249,18 @@ class Api:
         b = self._bridge()
         if b is not None:
             b.immersive_requested.emit()
+
+    def pick_window(self):
+        b = self._bridge()
+        if b is not None:
+            b.pick_window_requested.emit()
+
+    def toggle_map_mapping(self):
+        b = self._bridge()
+        if b is not None:
+            b.map_toggle_requested.emit()
+
+    def toggle_danmaku_mapping(self):
+        b = self._bridge()
+        if b is not None:
+            b.danmaku_toggle_requested.emit()

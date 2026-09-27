@@ -1,18 +1,18 @@
 """
 beacon_overlay.py
 ------------------
-"地图信标叠加层"：一个无边框、背景透明、始终置顶的独立顶层窗口
-用于显示一个可拖拽、可缩放的指南针贴图，帮助玩家把它对齐到游戏内的小地图上
-并根据 subtitle_parser 解析出的方向实时高亮显示对应方位
+无边框透明置顶窗口，显示可拖拽、可缩放的指南针，并根据字幕解析出的方向
+实时高亮对应方位
 
-交互说明：
-- 左键单击（非编辑模式下）：在"完整指南针"与"收起为小圆点"两种状态间切换
-  之所以设计成"收起"而不是真正的 QWidget.hide()，是因为窗口一旦被 hide()
-  就再也无法接收鼠标点击去恢复它——所以这里改为缩成一个仍可点击的小圆点，
-  行为上才真正符合"点一下切换显示/隐藏"的交互直觉
-- 右键单击：切换"对齐编辑模式"，进入编辑模式后会显示红色虚线边框和四角
-  缩放手柄，可拖动信标主体移动位置，或拖动手柄调整大小；再次右键单击退出
-  编辑模式，并把当前位置、大小保存到 config.json
+位置以相对目标窗口的比例（rel_x/rel_y）存储，目标窗口移动/缩放时等比
+换算，不会跑出目标窗口范围，实际是否显示 = 开关开着 且 目标窗口是当前
+前台窗口，两者的且
+
+交互：
+- 左键单击：展开 ↔ 收起（完整十字 ↔ 小圆点）
+  收起时缩成仍可点击的小圆点，而非 QWidget.hide()，以保留鼠标交互
+- 右键单击：切换对齐编辑模式（红色虚线框 + 四角缩放手柄）；
+  退出编辑模式时自动将位置/大小保存到 config.json
 """
 
 import math
@@ -25,11 +25,14 @@ from PySide6.QtWidgets import QWidget
 
 import config as config_module
 
-HANDLE_SIZE = 10  # 缩放手柄边长（像素）
-COLLAPSED_SIZE = 28  # 收起状态下的圆点直径（像素）
-MARKER_SIZE = 28  # 方向标记图片边长（像素）
+HANDLE_SIZE = 10
+COLLAPSED_SIZE = 28
+MARKER_SIZE = 28
 MARKER_PATH = os.path.join(config_module.app_dir(), "assets", "pictures", "marker.svg")
-COMPASS_PATH = os.path.join(config_module.app_dir(), "assets", "pictures", "compass.png")
+COMPASS_PATH = os.path.join(
+    config_module.app_dir(), "assets", "pictures", "compass.png"
+)
+MIN_SIZE = HANDLE_SIZE * 4
 
 
 class BeaconOverlay(QWidget):
@@ -38,26 +41,78 @@ class BeaconOverlay(QWidget):
         self.config = config
 
         beacon_cfg = config["beacon"]
-        self._expanded_geometry = QRect(
-            beacon_cfg["x"], beacon_cfg["y"], beacon_cfg["width"], beacon_cfg["height"]
-        )
-        self.setGeometry(self._expanded_geometry)
+        self._rel_x = float(beacon_cfg["rel_x"])
+        self._rel_y = float(beacon_cfg["rel_y"])
+        self._width = int(beacon_cfg["width"])
+        self._height = int(beacon_cfg["height"])
 
-        # 无边框 + 置顶 + 不在任务栏/Alt-Tab 中显示 + 背景透明
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
+        self._target_rect = None
+        self._enabled = False
+        self._has_focus = False
         self._edit_mode = False
         self._collapsed = False
-        self._drag_offset = None  # 拖动信标主体时，鼠标与窗口左上角的偏移
-        self._active_handle = None  # 当前正在拖动的缩放手柄名称
-        self._current_angle = None  # 当前高亮方向角度（0~359），None 表示暂无方向
+        self._drag_offset = None
+        self._active_handle = None
+        self._current_angle = None
 
-        self.show()
+    # ------------------------------------------------------------------
+    # 由 OverlayManager 调用的生命周期接口
+    # ------------------------------------------------------------------
+    def on_attach(self, rect):
+        self._target_rect = rect
+        self._apply_geometry()
+
+    def on_target_moved(self, rect):
+        self._target_rect = rect
+        self._apply_geometry()
+
+    def on_detach(self):
+        self._target_rect = None
+        self._enabled = False
+        self._has_focus = False
+        self._sync_visibility()
+
+    def set_enabled(self, enabled: bool):
+        self._enabled = enabled
+        self._sync_visibility()
+
+    def is_enabled(self) -> bool:
+        """返回用户开关的意图，不代表当前是否可见"""
+        return self._enabled
+
+    def on_focus_changed(self, has_focus: bool):
+        self._has_focus = has_focus
+        self._sync_visibility()
+
+    def _sync_visibility(self):
+        if self._enabled and self._has_focus and self._target_rect is not None:
+            self._apply_geometry()
+            self.show()
+            self.raise_()
+        else:
+            self.hide()
+
+    def _apply_geometry(self):
+        if self._target_rect is None:
+            return
+        tx, ty, tw, th = self._target_rect
+        w = COLLAPSED_SIZE if self._collapsed else self._width
+        h = COLLAPSED_SIZE if self._collapsed else self._height
+        w = max(1, min(w, max(1, tw)))
+        h = max(1, min(h, max(1, th)))
+        x = tx + self._rel_x * tw
+        y = ty + self._rel_y * th
+        x = max(tx, min(x, tx + tw - w))
+        y = max(ty, min(y, ty + th - h))
+        self.setGeometry(round(x), round(y), w, h)
 
     # ------------------------------------------------------------------
     # 对外接口：由 subtitle_parser 的 direction_detected 信号调用
@@ -86,7 +141,7 @@ class BeaconOverlay(QWidget):
         center = rect.center()
         radius = min(rect.width(), rect.height()) // 2
 
-        # 坐标十字线（淡色参考线，无文字、无圆圈，背景透明）
+        # 坐标十字参考线
         painter.setPen(QPen(QColor(255, 255, 255, 90), 1))
         painter.drawLine(
             center.x() - radius, center.y(), center.x() + radius, center.y()
@@ -100,15 +155,15 @@ class BeaconOverlay(QWidget):
         painter.setBrush(QBrush(QColor(255, 255, 255, 200)))
         painter.drawEllipse(center, 2, 2)
 
-        # 当前方向标记：在“十字为直径、圆心为原点”的圆边缘显示一个地图定位点
+        # 方向标记（圆边缘，0° = 正上方）
         if self._current_angle is not None:
-            rad = math.radians(self._current_angle - 90)  # -90 使 0° 对应正上方（北）
+            rad = math.radians(self._current_angle - 90)
             px = center.x() + radius * math.cos(rad)
             py = center.y() + radius * math.sin(rad)
             target = QRectF(
                 px - MARKER_SIZE / 2, py - MARKER_SIZE / 2, MARKER_SIZE, MARKER_SIZE
             )
-            QSvgRenderer(MARKER_PATH).render(painter, target)  # 定位点
+            QSvgRenderer(MARKER_PATH).render(painter, target)
 
         # 编辑模式：红色虚线边框 + 四角缩放手柄
         if self._edit_mode:
@@ -173,7 +228,10 @@ class BeaconOverlay(QWidget):
         if self._active_handle:
             self._resize_by_handle(self._active_handle, global_pos)
         elif self._drag_offset is not None:
-            self.move(global_pos - self._drag_offset)
+            new_top_left = global_pos - self._drag_offset
+            self._apply_and_remember(
+                new_top_left.x(), new_top_left.y(), self.width(), self.height()
+            )
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -183,49 +241,62 @@ class BeaconOverlay(QWidget):
 
     def _resize_by_handle(self, handle: str, global_pos: QPoint):
         geo = self.geometry()
-        min_size = HANDLE_SIZE * 4
 
         if handle == "bottom_right":
-            self.resize(
-                max(min_size, global_pos.x() - geo.x()),
-                max(min_size, global_pos.y() - geo.y()),
+            self._apply_and_remember(
+                geo.x(), geo.y(), global_pos.x() - geo.x(), global_pos.y() - geo.y()
             )
         elif handle == "top_left":
-            self.setGeometry(
+            self._apply_and_remember(
                 global_pos.x(),
                 global_pos.y(),
-                max(min_size, geo.right() - global_pos.x()),
-                max(min_size, geo.bottom() - global_pos.y()),
+                geo.right() - global_pos.x(),
+                geo.bottom() - global_pos.y(),
             )
         elif handle == "top_right":
-            self.setGeometry(
+            self._apply_and_remember(
                 geo.x(),
                 global_pos.y(),
-                max(min_size, global_pos.x() - geo.x()),
-                max(min_size, geo.bottom() - global_pos.y()),
+                global_pos.x() - geo.x(),
+                geo.bottom() - global_pos.y(),
             )
         elif handle == "bottom_left":
-            self.setGeometry(
+            self._apply_and_remember(
                 global_pos.x(),
                 geo.y(),
-                max(min_size, geo.right() - global_pos.x()),
-                max(min_size, global_pos.y() - geo.y()),
+                geo.right() - global_pos.x(),
+                global_pos.y() - geo.y(),
             )
+
+    def _apply_and_remember(self, x, y, w, h):
+        """将拖动/缩放结果夹在目标窗口范围内，应用并更新相对位置记录"""
+        w = max(MIN_SIZE, w)
+        h = max(MIN_SIZE, h)
+        if self._target_rect is not None:
+            tx, ty, tw, th = self._target_rect
+            w = min(w, max(1, tw))
+            h = min(h, max(1, th))
+            x = max(tx, min(x, tx + tw - w))
+            y = max(ty, min(y, ty + th - h))
+        self.setGeometry(round(x), round(y), round(w), round(h))
+        if not self._collapsed:
+            self._width, self._height = round(w), round(h)
+            if self._target_rect is not None:
+                tx, ty, tw, th = self._target_rect
+                if tw > 0 and th > 0:
+                    self._rel_x = (x - tx) / tw
+                    self._rel_y = (y - ty) / th
 
     # ------------------------------------------------------------------
     # 折叠 / 展开 / 编辑模式
     # ------------------------------------------------------------------
     def _collapse(self):
-        self._expanded_geometry = self.geometry()
         self._collapsed = True
-        top_left = self.geometry().topLeft()
-        self.setGeometry(top_left.x(), top_left.y(), COLLAPSED_SIZE, COLLAPSED_SIZE)
-        self.update()
+        self._apply_geometry()
 
     def _expand(self):
         self._collapsed = False
-        self.setGeometry(self._expanded_geometry)
-        self.update()
+        self._apply_geometry()
 
     def _toggle_edit_mode(self):
         self._edit_mode = not self._edit_mode
@@ -234,14 +305,12 @@ class BeaconOverlay(QWidget):
         self.update()
 
     def _save_geometry(self):
-        geo = self.geometry()
-        self._expanded_geometry = geo
         self.config["beacon"].update(
             {
-                "x": geo.x(),
-                "y": geo.y(),
-                "width": geo.width(),
-                "height": geo.height(),
+                "rel_x": self._rel_x,
+                "rel_y": self._rel_y,
+                "width": self._width,
+                "height": self._height,
             }
         )
         config_module.save_config(self.config)

@@ -3,14 +3,12 @@ main.py
 -------
 CompassPlayer 程序入口
 
-架构说明（受 pywebview 6.x 约束：`webview.start()` 必须在 Python 主线程调用）：
-- 主线程：`webview.start(gui="edgechromium")`，承载 WebView2（微软 Edge 内核）浏览器窗口，
-  它自带 H.264/HEVC/AAC 解码器，因此 B 站能正常播放（原 QtWebEngine 因缺专利编解码器而黑屏报错）
-- 后台线程：QApplication + 指南针悬浮窗(BeaconOverlay) + 全局热键(HotkeyManager)
-  + 字幕轮询(SubtitlePoller) + 设置弹窗
+架构（受 pywebview 6.x 约束）：
+- 主线程：webview.start()，承载 WebView2 窗口（支持 H.264/HEVC/AAC）
+- 后台线程：QApplication + BeaconOverlay + HotkeyManager + SubtitlePoller
 - 双向通信：
-  - Qt -> 页面：window.evaluate_js()（pywebview 内部用 WinForms Invoke marshaling，线程安全）
-  - 页面 -> Qt：js_api 回调 bridge 的 Qt 信号，PySide6 自动排队投递到 Qt 后台线程
+  - Qt → 页面：window.evaluate_js()（线程安全）
+  - 页面 → Qt：js_api 回调 bridge 的 Qt 信号，自动排队投递到 Qt 线程
 """
 
 import ctypes
@@ -22,34 +20,51 @@ from ctypes import wintypes
 
 import webview
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 from webview.errors import WebViewException
 
 import config as config_module
-from beacon_overlay import BeaconOverlay
-from hotkey_manager import HotkeyManager
-from settings_dialog import SettingsDialog
-from subtitle_parser import SubtitlePoller
-from webview_chrome import Api, build_chrome_js, build_hint_text
+from bilibili import bilibili_danmaku
+from bilibili.subtitle_parser import SubtitlePoller
+from overlay.beacon_overlay import BeaconOverlay
+from overlay.danmaku_overlay import DanmakuOverlay, VideoTimeSync
+from overlay.overlay_manager import OverlayManager
+from ui.hotkey_manager import HotkeyManager
+from ui.settings_dialog import SettingsDialog
+from ui.webview_chrome import Api, build_chrome_js, build_hint_text
+from ui.window_picker import WindowPickerDialog
 
-# 让新窗口/外链在当前窗口打开，而非跳系统浏览器；debug 下不自动弹 DevTools
 webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = False
 webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] = False
-# 抑制 debug=True 时 pywebview 刷屏的 DEBUG 日志
 os.environ.setdefault("PYWEBVIEW_LOG", "1")
 
 BASE_DIR = config_module.app_dir()
-STORAGE_PATH = os.path.join(
-    BASE_DIR, "webview_profile"
-)  # WebView2 用户数据目录（Cookie/登录态）
+STORAGE_PATH = os.path.join(BASE_DIR, "webview_profile")
 
 WINDOW_TITLE = "CompassPlayer"
 
-# 控制页面 <video> 的 JS
 PLAY_PAUSE_JS = (
     "(function(){var v=document.querySelector('video');"
     " if(v){ v.paused ? v.play() : v.pause(); }})();"
 )
+
+# ---------------------------------------------------------------------------
+# Win32 常量
+# ---------------------------------------------------------------------------
+_GWL_STYLE = -16
+_GWL_EXSTYLE = -20
+_WS_CAPTION = 0x00C00000
+_WS_THICKFRAME = 0x00040000
+_WS_EX_LAYERED = 0x00080000
+_WS_EX_TRANSPARENT = 0x00000020
+_SWP_NOMOVE = 0x0002
+_SWP_NOSIZE = 0x0001
+_SWP_NOZORDER = 0x0004
+_SWP_FRAMECHANGED = 0x0020
+_LWA_ALPHA = 0x00000002
+
+WH_MOUSE_LL = 14
+WM_MOUSEMOVE = 0x0200
 
 
 def seek_js(delta: int) -> str:
@@ -64,8 +79,8 @@ class Controller:
 
     def __init__(self):
         self.qt_ready = threading.Event()
-        self.bridge = None  # QObject，生活在 Qt 线程
-        self.window = None  # pywebview window
+        self.bridge = None
+        self.window = None
         self.hint_text = "CompassPlayer"
         self.immersive = False
         self.visible = True
@@ -81,6 +96,10 @@ class Bridge(QObject):
     settings_requested = Signal()
     immersive_requested = Signal()
     quit_requested = Signal()
+    pick_window_requested = Signal()
+    map_toggle_requested = Signal()
+    danmaku_toggle_requested = Signal()
+    danmaku_fetched = Signal(object)
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +113,7 @@ def _run_js(controller, script):
         return w.evaluate_js(script)
     except WebViewException as e:
         print("[main] evaluate_js 失败:", e)
+        controller.window = None
         return None
 
 
@@ -132,25 +152,24 @@ def _toggle_immersive(controller, config):
 
 
 def _set_frameless(controller, frameless):
-    """运行时切换无边框：去掉/恢复原生标题栏与边框（pywebview 的 frameless 仅创建时生效）"""
+    """运行时切换无边框（去掉/恢复原生标题栏与边框）"""
     hwnd = _get_window_hwnd(controller)
     if not hwnd:
         return
-    GWL_STYLE = -16
-    WS_CAPTION = 0x00C00000
-    WS_THICKFRAME = 0x00040000
-    SWP_NOMOVE = 0x0002
-    SWP_NOSIZE = 0x0001
-    SWP_NOZORDER = 0x0004
-    SWP_FRAMECHANGED = 0x0020
-    style = _user32.GetWindowLongW(hwnd, GWL_STYLE)
+    style = _user32.GetWindowLongW(hwnd, _GWL_STYLE)
     if frameless:
-        style &= ~(WS_CAPTION | WS_THICKFRAME)
+        style &= ~(_WS_CAPTION | _WS_THICKFRAME)
     else:
-        style |= WS_CAPTION | WS_THICKFRAME
-    _user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+        style |= _WS_CAPTION | _WS_THICKFRAME
+    _user32.SetWindowLongW(hwnd, _GWL_STYLE, style)
     _user32.SetWindowPos(
-        hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
+        hwnd,
+        0,
+        0,
+        0,
+        0,
+        0,
+        _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOZORDER | _SWP_FRAMECHANGED,
     )
 
 
@@ -159,20 +178,15 @@ def _find_window_hwnd():
 
 
 def _set_window_opacity(controller, opacity):
-    """整窗透明度（尽力而为）：通过 Win32 layered window 作用于顶层窗口
-
-    注意：WebView2 用 DirectComposition 渲染，整窗 alpha 可能不生效；不生效时该功能降级
-    """
+    """通过 Win32 layered window 设置整窗透明度（WebView2 的 DirectComposition 渲染
+    可能使此功能降级为无效）"""
     hwnd = _get_window_hwnd(controller)
     if not hwnd:
         print("[main] 未找到窗口句柄，透明度调节不可用")
         return
-    GWL_EXSTYLE = -20
-    WS_EX_LAYERED = 0x00080000
-    LWA_ALPHA = 0x00000002
-    style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
-    _user32.SetLayeredWindowAttributes(hwnd, 0, int(opacity * 255), LWA_ALPHA)
+    style = _user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
+    _user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, style | _WS_EX_LAYERED)
+    _user32.SetLayeredWindowAttributes(hwnd, 0, int(opacity * 255), _LWA_ALPHA)
 
 
 def _adjust_opacity(controller, config, delta):
@@ -183,21 +197,18 @@ def _adjust_opacity(controller, config, delta):
 
 
 def _set_click_through(controller, enable):
-    """让窗口（含 WebView2 子控件）不接收鼠标点击，点击穿透到下方窗口"""
+    """开启/关闭整个 WebView2 窗口（含子控件）的点击穿透"""
     hwnd = _get_window_hwnd(controller)
     if not hwnd:
         return
-    GWL_EXSTYLE = -20
-    WS_EX_TRANSPARENT = 0x00000020
-    WS_EX_LAYERED = 0x00080000
 
     def apply(h):
-        style = _user32.GetWindowLongW(h, GWL_EXSTYLE)
+        style = _user32.GetWindowLongW(h, _GWL_EXSTYLE)
         if enable:
-            style |= WS_EX_TRANSPARENT | WS_EX_LAYERED
+            style |= _WS_EX_TRANSPARENT | _WS_EX_LAYERED
         else:
-            style &= ~WS_EX_TRANSPARENT
-        _user32.SetWindowLongW(h, GWL_EXSTYLE, style)
+            style &= ~_WS_EX_TRANSPARENT
+        _user32.SetWindowLongW(h, _GWL_EXSTYLE, style)
 
     apply(hwnd)
     child = _user32.FindWindowExW(hwnd, 0, None, None)
@@ -223,7 +234,7 @@ def _cursor_inside_window(controller, x, y):
 
 
 def _apply_hover_peek(controller, config, active):
-    """沉浸模式下：鼠标悬停→最小透明度+点击穿透；移开→恢复"""
+    """沉浸模式下：鼠标悬停 → 最小透明度 + 点击穿透；移开 → 恢复"""
     if active == controller._hover_peek_active:
         return
     controller._hover_peek_active = active
@@ -235,19 +246,15 @@ def _apply_hover_peek(controller, config, active):
 
 
 # ---------------------------------------------------------------------------
-# 全局低层鼠标钩子（WH_MOUSE_LL）：沉浸模式下实时检测鼠标划入/划出窗口，无轮询
+# 全局低层鼠标钩子（WH_MOUSE_LL）：沉浸模式下实时检测鼠标划入/划出窗口
 # ---------------------------------------------------------------------------
-WH_MOUSE_LL = 14
-WM_MOUSEMOVE = 0x0200
-
-
 class _MSLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [
         ("pt", wintypes.POINT),
         ("mouseData", wintypes.DWORD),
         ("flags", wintypes.DWORD),
         ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_size_t),  # ULONG_PTR
+        ("dwExtraInfo", ctypes.c_size_t),
     ]
 
 
@@ -255,11 +262,9 @@ _HOOKPROC = ctypes.WINFUNCTYPE(
     ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
 )
 
-# 设置正确的参数/返回类型，避免 64 位句柄被截断为 32 位导致失效
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
 
-# 窗口查找 / 样式 / 分层 / 几何
 _user32.FindWindowW.restype = ctypes.c_void_p
 _user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 _user32.FindWindowExW.restype = ctypes.c_void_p
@@ -292,9 +297,7 @@ _user32.SetLayeredWindowAttributes.argtypes = [
     wintypes.BYTE,
     wintypes.DWORD,
 ]
-
-# 全局低层鼠标钩子
-_user32.SetWindowsHookExW.restype = ctypes.c_void_p  # HHOOK
+_user32.SetWindowsHookExW.restype = ctypes.c_void_p
 _user32.SetWindowsHookExW.argtypes = [
     ctypes.c_int,
     _HOOKPROC,
@@ -310,12 +313,12 @@ _user32.CallNextHookEx.argtypes = [
     wintypes.WPARAM,
     wintypes.LPARAM,
 ]
-_kernel32.GetModuleHandleW.restype = ctypes.c_void_p  # HMODULE
+_kernel32.GetModuleHandleW.restype = ctypes.c_void_p
 _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 
 
 class MouseHookManager:
-    """全局低层鼠标钩子：实时检测鼠标划入/划出窗口，驱动沉浸模式悬停透视（无轮询）"""
+    """全局低层鼠标钩子：驱动沉浸模式悬停透视（无轮询"""
 
     def __init__(self, controller, config):
         self.controller = controller
@@ -359,7 +362,6 @@ def _on_settings_saved(controller, config, hotkeys):
 
 
 def _open_settings(controller, config, hotkeys):
-    # 单例 + 置顶浮窗：点击多次只存在一个，且显示在主窗口之上
     dialog = controller._settings_dialog
     if dialog is not None and dialog.isVisible():
         dialog.raise_()
@@ -380,7 +382,7 @@ def _open_settings(controller, config, hotkeys):
 
 
 def _request_quit(controller):
-    """请求退出：通过 bridge 信号投递到 Qt 线程执行清理并退出事件循环"""
+    """通过 bridge 信号投递到 Qt 线程执行清理并退出事件循环"""
     b = controller.bridge
     if b is not None:
         try:
@@ -400,12 +402,13 @@ def run_qt(controller, config):
     controller.bridge = bridge
 
     beacon = BeaconOverlay(config)
+    danmaku = DanmakuOverlay(config)
+    manager = OverlayManager(beacon, danmaku)
     hotkeys = HotkeyManager(config)
 
     def run_js(script):
         return _run_js(controller, script)
 
-    # 视频控制热键
     hotkeys.play_pause_triggered.connect(lambda: run_js(PLAY_PAUSE_JS))
     hotkeys.seek_backward_triggered.connect(
         lambda: run_js(seek_js(-config["seek_seconds"]))
@@ -413,8 +416,6 @@ def run_qt(controller, config):
     hotkeys.seek_forward_triggered.connect(
         lambda: run_js(seek_js(config["seek_seconds"]))
     )
-
-    # 窗口控制热键
     hotkeys.opacity_down_triggered.connect(
         lambda: _adjust_opacity(controller, config, -config["opacity_step"])
     )
@@ -426,25 +427,128 @@ def run_qt(controller, config):
         lambda: _toggle_immersive(controller, config)
     )
 
-    # 字幕轮询 -> 指南针
     poller = SubtitlePoller(run_js)
     poller.direction_detected.connect(beacon.set_direction)
 
-    # js_api -> bridge 信号 -> Qt 线程动作
+    video_sync = VideoTimeSync(run_js)
+    video_sync.time_updated.connect(danmaku.on_time_update)
+    _danmaku_state = {"loaded_href": None}
+
+    def _set_map_button(active):
+        run_js(
+            "window.__compassChrome && window.__compassChrome.setMapActive("
+            + ("true" if active else "false")
+            + ");"
+        )
+
+    def _set_danmaku_button(active):
+        run_js(
+            "window.__compassChrome && window.__compassChrome.setDanmakuActive("
+            + ("true" if active else "false")
+            + ");"
+        )
+
+    def _fetch_danmaku_async(url):
+        def _fetch():
+            try:
+                items = bilibili_danmaku.fetch_danmaku_for_url(url)
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                print("[danmaku] 拉取弹幕失败:", e)
+                items = []
+            bridge.danmaku_fetched.emit(items)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _on_danmaku_fetched(items):
+        danmaku.load_items(items)
+        if not items:
+            print("[danmaku] 未获取到弹幕（该视频可能没有弹幕，或接口暂时不可用）")
+
+    def _on_video_changed(href):
+        _danmaku_state["loaded_href"] = href
+        danmaku.load_items([])
+        _fetch_danmaku_async(href)
+
+    def _current_href():
+        return (
+            run_js("(function(){return document.location.href;})();")
+            or config.get("last_url")
+            or ""
+        )
+
+    def _pick_window():
+        dlg = WindowPickerDialog(exclude_titles=(WINDOW_TITLE,))
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.selected_hwnd:
+            return
+        if not manager.attach_to_window(dlg.selected_hwnd):
+            print("[overlay] 目标窗口无效，未能挂载")
+            return
+        video_sync.stop()
+        _set_map_button(False)
+        _set_danmaku_button(False)
+        run_js(
+            "window.__compassChrome && window.__compassChrome.setWindowPicked(true);"
+        )
+
+    def _toggle_map_mapping():
+        if not manager.is_attached():
+            return
+        new_state = not beacon.is_enabled()
+        beacon.set_enabled(new_state)
+        manager.restack()
+        _set_map_button(new_state)
+
+    def _toggle_danmaku_mapping():
+        if not manager.is_attached():
+            return
+        if danmaku.is_enabled():
+            danmaku.set_enabled(False)
+            video_sync.stop()
+            _set_danmaku_button(False)
+            return
+        href = _current_href()
+        danmaku.set_enabled(True)
+        manager.restack()
+        _set_danmaku_button(True)
+        video_sync.start(known_bvid=bilibili_danmaku.extract_bvid(href))
+        if _danmaku_state["loaded_href"] != href:
+            _danmaku_state["loaded_href"] = href
+            danmaku.load_items([])
+            _fetch_danmaku_async(href)
+
+    def _on_target_lost():
+        video_sync.stop()
+        _set_map_button(False)
+        _set_danmaku_button(False)
+        run_js(
+            "window.__compassChrome && window.__compassChrome.setWindowPicked(false);"
+        )
+        print("[overlay] 目标窗口已关闭或最小化，已自动解绑")
+
+    manager.target_lost.connect(_on_target_lost)
+    video_sync.video_changed.connect(_on_video_changed)
+
     bridge.navigate_requested.connect(lambda url: _navigate(controller, url))
     bridge.settings_requested.connect(
         lambda: _open_settings(controller, config, hotkeys)
     )
     bridge.immersive_requested.connect(lambda: _toggle_immersive(controller, config))
+    bridge.pick_window_requested.connect(_pick_window)
+    bridge.map_toggle_requested.connect(_toggle_map_mapping)
+    bridge.danmaku_toggle_requested.connect(_toggle_danmaku_mapping)
+    bridge.danmaku_fetched.connect(_on_danmaku_fetched)
 
-    # 沉浸模式下：鼠标悬停 → 最小透明度 + 点击穿透（全局低层鼠标钩子，无轮询）
     mouse_hook = MouseHookManager(controller, config)
     mouse_hook.start()
 
     def _shutdown():
         mouse_hook.stop()
         try:
+            video_sync.stop()
+            manager.shutdown()
             beacon.close()
+            danmaku.close()
             hotkeys.shutdown()
         except RuntimeError:
             pass
@@ -479,12 +583,10 @@ def main():
     controller = Controller()
     controller.hint_text = build_hint_text(config["hotkeys"])
 
-    # 1. 启动 Qt 后台线程
     qt_thread = threading.Thread(target=run_qt, args=(controller, config), daemon=True)
     qt_thread.start()
     controller.qt_ready.wait(timeout=10)
 
-    # 2. 创建 WebView2 窗口（在主线程）
     geo = config["window_geometry"]
     api = Api(lambda: controller.bridge)
     start_url = config.get("last_url") or config["start_url"]
@@ -503,7 +605,6 @@ def main():
     def _save_geometry():
         try:
             x, y, w, h = window.x, window.y, window.width, window.height
-            # 窗口隐藏/销毁的过渡态会返回离屏坐标或极小尺寸，跳过以免污染配置
             if w < 100 or h < 100 or x < -30000 or y < -30000:
                 return
             config["window_geometry"] = {"x": x, "y": y, "width": w, "height": h}
@@ -511,7 +612,6 @@ def main():
             pass
 
     def on_loaded(*args):
-        # 每次导航完成后：注入覆盖层 + 同步地址栏 + 记住当前页面
         try:
             window.evaluate_js(build_chrome_js(controller.hint_text))
             current = window.get_current_url()
@@ -532,21 +632,19 @@ def main():
     window.events.moved += lambda *a: _save_geometry()
 
     def on_closed(*args):
-        # 窗口被关闭（右上角 X）时立即请求退出，避免指南针/进程残留
+        controller.window = None
         config_module.save_config(config)
         _request_quit(controller)
 
     window.events.closed += on_closed
 
-    # 3. 启动 pywebview（主线程，阻塞直到窗口关闭）
     webview.start(
         gui="edgechromium",
-        private_mode=False,  # 保留 Cookie/localStorage，登录态持久化
+        private_mode=False,
         storage_path=STORAGE_PATH,
-        debug=True,  # 启用 WebView2 默认右键菜单（后退/前进等）
+        debug=True,
     )
 
-    # 4. 清理：保存配置、退出 Qt（几何信息已由 resized/moved/loaded 事件持续更新）
     config_module.save_config(config)
     _request_quit(controller)
     qt_thread.join(timeout=5)
