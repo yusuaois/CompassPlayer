@@ -96,7 +96,7 @@ class Bridge(QObject):
     pick_window_requested = Signal()
     map_toggle_requested = Signal()
     danmaku_toggle_requested = Signal()
-    danmaku_fetched = Signal(object)
+    danmaku_fetched = Signal(str, object)
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +111,16 @@ def _run_js(controller, script):
     except WebViewException as e:
         print("[main] evaluate_js 失败:", e)
         return None
+
+
+def _bili_cookie(controller):
+    """WebView2 当前页面的 Cookie 头（含 HttpOnly 的登录态），使弹幕请求与网页播放器同一身份"""
+    try:
+        jars = controller.window.get_cookies()
+    except WebViewException as e:
+        print("[main] 读取 Cookie 失败:", e)
+        return ""
+    return "; ".join(f"{name}={m.value}" for jar in jars for name, m in jar.items())
 
 
 def _navigate(controller, url):
@@ -461,23 +471,28 @@ def run_qt(controller, config):
             + ");"
         )
 
-    def _fetch_danmaku_async(url):
+    def _fetch_danmaku_async(href):
         def _fetch():
+            cookie = _bili_cookie(controller)
             try:
-                items = bilibili_danmaku.fetch_danmaku_for_url(url)
-            except (OSError, ValueError, KeyError, TypeError) as e:
+                items = bilibili_danmaku.fetch_danmaku_for_url(href, cookie)
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as e:
                 print("[danmaku] 拉取弹幕失败:", e)
                 items = []
-            bridge.danmaku_fetched.emit(items)
+            bridge.danmaku_fetched.emit(href, items)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _on_danmaku_fetched(items):
-        danmaku.load_items(items)
-        if not items:
+    def _on_danmaku_fetched(href, items):
+        if href != _danmaku_state["loaded_href"]:
+            return  # 拉取期间已切换视频，丢弃过期结果
+        if items:
+            danmaku.load_items(items)
+        else:
+            _danmaku_state["loaded_href"] = None  # 再次开启弹幕时重试
             print("[danmaku] 未获取到弹幕（该视频可能没有弹幕，或接口暂时不可用）")
 
-    def _on_video_changed(href):
+    def _load_danmaku(href):
         _danmaku_state["loaded_href"] = href
         danmaku.load_items([])
         _fetch_danmaku_async(href)
@@ -535,12 +550,10 @@ def run_qt(controller, config):
         danmaku.set_enabled(True)
         manager.restack()
         _set_danmaku_button(True)
-        video_sync.start(known_bvid=bilibili_danmaku.extract_bvid(_current_href()))
+        video_sync.start(known_key=bilibili_danmaku.video_key(href))
         _apply_bili_danmaku_settings()
         if _danmaku_state["loaded_href"] != href:
-            _danmaku_state["loaded_href"] = href
-            danmaku.load_items([])
-            _fetch_danmaku_async(href)
+            _load_danmaku(href)
 
     def _on_target_lost():
         controller.window_picked = False
@@ -568,6 +581,7 @@ def run_qt(controller, config):
     bridge.map_toggle_requested.connect(_toggle_map_mapping)
     bridge.danmaku_toggle_requested.connect(_toggle_danmaku_mapping)
     bridge.danmaku_fetched.connect(_on_danmaku_fetched)
+    video_sync.video_changed.connect(_load_danmaku)
 
     mouse_hook = MouseHookManager(controller, config)
     mouse_hook.start()

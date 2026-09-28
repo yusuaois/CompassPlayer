@@ -59,12 +59,12 @@ class VideoTimeSync(QObject):
         super().__init__()
         self._run_js = run_js
         self._interval_ms = interval_ms
-        self._last_bvid = None
+        self._last_video_key = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
 
-    def start(self, known_bvid=None):
-        self._last_bvid = known_bvid
+    def start(self, known_key=None):
+        self._last_video_key = known_key
         self._timer.start(self._interval_ms)
 
     def stop(self):
@@ -80,9 +80,9 @@ class VideoTimeSync(QObject):
         except (ValueError, AttributeError):
             return
 
-        bvid = bilibili_danmaku.extract_bvid(href)
-        if bvid and bvid != self._last_bvid:
-            self._last_bvid = bvid
+        key = bilibili_danmaku.video_key(href)
+        if key and key != self._last_video_key:
+            self._last_video_key = key
             self.video_changed.emit(href)
             return
 
@@ -395,15 +395,16 @@ class DanmakuOverlay(QWidget):
         self._top_slots = [-1e9] * slot_count
         self._bottom_slots = [-1e9] * slot_count
 
-    def _reflow_from(self, video_time):
+    def _reflow_from(self, video_time: float):
         """seek 或重新加载后调用：清空画面，将待生成指针对齐到 video_time"""
         self._active_scroll = []
         self._active_top = []
         self._active_bottom = []
         self._reset_lanes()
         self.update()
-        times = [it.time for it in self._items]
-        self._next_index = bisect.bisect_left(times, video_time)
+        self._next_index = bisect.bisect_left(
+            self._items, video_time, key=lambda item: item.time
+        )
 
     def _spawn_due(self, current_time):
         n = len(self._items)

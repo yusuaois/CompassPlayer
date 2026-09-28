@@ -13,12 +13,23 @@ REQUEST_UA = (
 )
 REQUEST_HEADERS = {"User-Agent": REQUEST_UA, "Referer": "https://www.bilibili.com"}
 
-# 弹幕 XML 接口 URL 模板（format 参数：cid）
-DANMAKU_XML_URL = "https://comment.bilibili.com/{cid}.xml"
-DANMAKU_XML_FALLBACK_URL = "https://api.bilibili.com/x/v1/dm/list.so?oid={cid}"
+# Protobuf 弹幕分段接口（需 WBI 签名），每段覆盖 DANMAKU_SEGMENT_SECONDS 秒
+DANMAKU_SEG_URL = "https://api.bilibili.com/x/v2/dm/wbi/web/seg.so"
+DANMAKU_SEGMENT_SECONDS = 360
 
 # 视频分 P 信息接口 URL 模板（format 参数：bvid）
 PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist?bvid={bvid}"
+
+# WBI 签名：nav 接口返回当日 img_key / sub_key，按重排表混淆为 mixin_key
+NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
+# fmt: off
+WBI_MIXIN_TAB = (
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+)
+# fmt: on
 
 # 视频 BV 号正则（从播放页 URL 提取）
 BVID_RE = re.compile(r"BV[0-9A-Za-z]{10}")
