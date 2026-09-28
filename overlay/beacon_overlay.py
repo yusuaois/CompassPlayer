@@ -93,7 +93,11 @@ class BeaconOverlay(QWidget):
         self._sync_visibility()
 
     def _sync_visibility(self):
-        if self._enabled and self._has_focus and self._target_rect is not None:
+        if (
+            self._enabled
+            and self._target_rect is not None
+            and (self._has_focus or self._edit_mode)
+        ):
             self._apply_geometry()
             self.show()
             self.raise_()
@@ -302,6 +306,7 @@ class BeaconOverlay(QWidget):
         self._edit_mode = not self._edit_mode
         if not self._edit_mode:
             self._save_geometry()
+            self._sync_visibility()
         self.update()
 
     def _save_geometry(self):
