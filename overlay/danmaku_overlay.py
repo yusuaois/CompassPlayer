@@ -8,11 +8,6 @@ danmaku_overlay.py
 
 弹幕轨道（第几行）由本模块自行排版：B 站官方数据不含轨道信息
 全程点击穿透，不影响目标窗口的鼠标操作
-
-性能注意（勿退化）：
-- 文字用 QPainter.drawText() 画，走 Qt 字形缓存；不要改用 QPainterPath 描边
-- 无弹幕在动时跳过整帧；有弹幕时只对"旧位置 ∪ 新位置"调用 update(region)，
-  不要改回无参数的 update()
 """
 
 import bisect
@@ -34,15 +29,24 @@ TOP_MODES = bilibili_danmaku.TOP_MODES
 _FONT_PX_BY_SIZE = {18: 16, 25: 20, 36: 28}  # B 站字号档位 -> 参考像素（720p 基准）
 _REF_HEIGHT = 720
 _VIDEO_POLL_MS = 300
-_SEEK_JUMP_THRESHOLD = 1.2  # 秒；轮询时间跳变超过此值视为用户拖动进度条
+_SEEK_JUMP_THRESHOLD = 1.2  # 秒；轮询时间跳变超过此值视为拖动进度条
 _MIN_LANE_GAP = 0.4  # 秒；同一轨道相邻弹幕的最小间隔
 
+_BILI_SPEEDPLUS_MAP = {1: 0.5, 2: 0.75, 3: 1.0, 4: 1.5, 5: 2.0}
+
 _VIDEO_STATE_JS = (
-    "(function(){var v=document.querySelector('video');"
+    "(function(){var v=document.querySelector('bwp-video')||document.querySelector('video');"
     " if(!v) return '';"
     " return v.currentTime.toFixed(3)+'|'+(v.paused?0:1)+'|'"
     "+encodeURIComponent(document.location.href);})();"
 )
+
+
+def _map_bili_speedplus(raw) -> float:
+    v = float(raw)
+    if 0.1 <= v <= 2.5:  # 直接浮点倍率
+        return v
+    return _BILI_SPEEDPLUS_MAP.get(int(v), 1.0)  # 整数档位
 
 
 class VideoTimeSync(QObject):
@@ -80,7 +84,7 @@ class VideoTimeSync(QObject):
         if bvid and bvid != self._last_bvid:
             self._last_bvid = bvid
             self.video_changed.emit(href)
-            return  # 等新弹幕加载完再派发时间
+            return
 
         try:
             self.time_updated.emit(float(t_str), playing_str == "1")
@@ -169,6 +173,11 @@ class DanmakuOverlay(QWidget):
         self._click_through_applied = False
         self._last_tick_ts = None
 
+        # 当前允许渲染的弹幕类型；apply_bili_settings() 根据用户的 B 站设置动态收窄
+        self._enabled_modes = frozenset(bilibili_danmaku.SUPPORTED_MODES)
+        # 是否显示彩色弹幕（B 站 typeColor: false 时只显示白色弹幕）
+        self._color_enabled = True
+
         self._tick_timer = QTimer(self)
         self._tick_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._tick_timer.timeout.connect(self._tick)
@@ -232,6 +241,89 @@ class DanmakuOverlay(QWidget):
             self._active_top = []
             self._active_bottom = []
             self.hide()
+
+    # ------------------------------------------------------------------
+    # 同步 B 站弹幕设置
+    # ------------------------------------------------------------------
+    def apply_bili_settings(self, settings: dict):
+        """
+        将从 B 站 localStorage 读取到的弹幕设置 apply 到本 overlay
+        """
+        if not settings:
+            return
+        dcfg = self._dcfg()
+        changed = False
+
+        # 不透明度（0.0-1.0）
+        if settings.get("opacity") is not None:
+            try:
+                dcfg["opacity"] = max(0.1, min(1.0, float(settings["opacity"])))
+                changed = True
+            except (TypeError, ValueError):
+                pass
+
+        # 显示区域（B 站存整数 0-100，转 0.0-1.0）
+        if settings.get("dmarea") is not None:
+            try:
+                dcfg["display_area"] = max(
+                    0.05, min(1.0, float(settings["dmarea"]) / 100.0)
+                )
+                changed = True
+            except (TypeError, ValueError):
+                pass
+
+        # 字号缩放（直接浮点倍率）
+        if settings.get("fontsize") is not None:
+            try:
+                dcfg["font_scale"] = max(0.5, min(2.0, float(settings["fontsize"])))
+                changed = True
+            except (TypeError, ValueError):
+                pass
+
+        # 速度
+        if settings.get("speedplus") is not None:
+            try:
+                dcfg["speed"] = _map_bili_speedplus(settings["speedplus"])
+                changed = True
+            except (TypeError, ValueError):
+                pass
+
+        # 类型过滤
+        # typeTopBottom 是顶/底弹幕的总开关，typeTop / typeBottom 是各自的开关
+        enabled = set(bilibili_danmaku.SUPPORTED_MODES)
+        type_fields_present = any(
+            k in settings
+            for k in ("typeScroll", "typeTop", "typeBottom", "typeTopBottom")
+        )
+        if type_fields_present:
+            if settings.get("typeScroll") is False:
+                enabled -= bilibili_danmaku.SCROLL_MODES
+                enabled -= bilibili_danmaku.REVERSE_MODES
+
+            top_on = settings.get("typeTop", True) and settings.get(
+                "typeTopBottom", True
+            )
+            if not top_on:
+                enabled -= bilibili_danmaku.TOP_MODES
+
+            bottom_on = settings.get("typeBottom", True) and settings.get(
+                "typeTopBottom", True
+            )
+            if not bottom_on:
+                enabled -= bilibili_danmaku.BOTTOM_MODES
+
+            self._enabled_modes = frozenset(enabled)
+            changed = True
+
+        # 彩色弹幕过滤（typeColor: false 时只显示白色弹幕 0xFFFFFF）
+        if "typeColor" in settings:
+            self._color_enabled = bool(settings.get("typeColor", True))
+            changed = True
+
+        if changed:
+            self._font_cache.clear()
+            self._metrics_cache.clear()
+            self._reset_lanes()
 
     # ------------------------------------------------------------------
     # 弹幕数据
@@ -322,6 +414,13 @@ class DanmakuOverlay(QWidget):
             self._next_index += 1
 
     def _spawn_one(self, item, now):
+        # 跳过用户在 B 站已禁用的弹幕类型
+        if item.mode not in self._enabled_modes:
+            return
+        # 跳过彩色弹幕（若用户在 B 站关闭了彩色弹幕）
+        if not self._color_enabled and item.color != 0xFFFFFF:
+            return
+
         color = QColor(
             (item.color >> 16) & 0xFF, (item.color >> 8) & 0xFF, item.color & 0xFF
         )
@@ -362,7 +461,6 @@ class DanmakuOverlay(QWidget):
                 vis.y = self.height() - (slot + 1) * lane_h - 4
                 self._active_bottom.append(vis)
             slots[slot] = vis.expire_at
-            # 固定弹幕不滚动，生成后触发一次局部重绘让它立刻出现
             self.update(vis.rect(self.width()))
 
     # ------------------------------------------------------------------

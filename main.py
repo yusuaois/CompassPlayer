@@ -24,15 +24,9 @@ from PySide6.QtWidgets import QApplication, QDialog
 from webview.errors import WebViewException
 
 import config as config_module
-from bilibili import bilibili_danmaku
-from bilibili.subtitle_parser import SubtitlePoller
-from overlay.beacon_overlay import BeaconOverlay
-from overlay.danmaku_overlay import DanmakuOverlay, VideoTimeSync
-from overlay.overlay_manager import OverlayManager
-from ui.hotkey_manager import HotkeyManager
-from ui.settings_dialog import SettingsDialog
-from ui.webview_chrome import Api, build_chrome_js, build_hint_text
-from ui.window_picker import WindowPickerDialog
+from bilibili import bilibili_config, bilibili_danmaku, subtitle_parser
+from overlay import beacon_overlay, danmaku_overlay, overlay_manager
+from ui import hotkey_manager, settings_dialog, webview_chrome, window_picker
 
 webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = False
 webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] = False
@@ -44,7 +38,7 @@ STORAGE_PATH = os.path.join(BASE_DIR, "webview_profile")
 WINDOW_TITLE = "CompassPlayer"
 
 PLAY_PAUSE_JS = (
-    "(function(){var v=document.querySelector('video');"
+    "(function(){var v=document.querySelector('bwp-video')||document.querySelector('video');"
     " if(v){ v.paused ? v.play() : v.pause(); }})();"
 )
 
@@ -69,7 +63,7 @@ WM_MOUSEMOVE = 0x0200
 
 def seek_js(delta: int) -> str:
     return (
-        "(function(){var v=document.querySelector('video');"
+        "(function(){var v=document.querySelector('bwp-video')||document.querySelector('video');"
         " if(v){ v.currentTime += (" + str(delta) + "); }})();"
     )
 
@@ -87,6 +81,9 @@ class Controller:
         self._settings_dialog = None
         self._hover_peek_active = False
         self._cached_hwnd = None
+        self.window_picked = False
+        self.map_active = False
+        self.danmaku_active = False
 
 
 class Bridge(QObject):
@@ -113,7 +110,6 @@ def _run_js(controller, script):
         return w.evaluate_js(script)
     except WebViewException as e:
         print("[main] evaluate_js 失败:", e)
-        controller.window = None
         return None
 
 
@@ -318,7 +314,7 @@ _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 
 
 class MouseHookManager:
-    """全局低层鼠标钩子：驱动沉浸模式悬停透视（无轮询"""
+    """全局低层鼠标钩子：驱动沉浸模式悬停透视"""
 
     def __init__(self, controller, config):
         self.controller = controller
@@ -351,7 +347,7 @@ class MouseHookManager:
 
 def _on_settings_saved(controller, config, hotkeys):
     hotkeys.apply_hotkeys(config)
-    hint = build_hint_text(config["hotkeys"])
+    hint = webview_chrome.build_hint_text(config["hotkeys"])
     controller.hint_text = hint
     _run_js(
         controller,
@@ -371,7 +367,7 @@ def _open_settings(controller, config, hotkeys):
     def _on_closed(_result):
         controller._settings_dialog = None
 
-    dialog = SettingsDialog(config)
+    dialog = settings_dialog.SettingsDialog(config)
     dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
     dialog.saved.connect(lambda _c: _on_settings_saved(controller, config, hotkeys))
     dialog.finished.connect(_on_closed)
@@ -401,10 +397,10 @@ def run_qt(controller, config):
     bridge = Bridge()
     controller.bridge = bridge
 
-    beacon = BeaconOverlay(config)
-    danmaku = DanmakuOverlay(config)
-    manager = OverlayManager(beacon, danmaku)
-    hotkeys = HotkeyManager(config)
+    beacon = beacon_overlay.BeaconOverlay(config)
+    danmaku = danmaku_overlay.DanmakuOverlay(config)
+    manager = overlay_manager.OverlayManager(beacon, danmaku)
+    hotkeys = hotkey_manager.HotkeyManager(config)
 
     def run_js(script):
         return _run_js(controller, script)
@@ -427,13 +423,30 @@ def run_qt(controller, config):
         lambda: _toggle_immersive(controller, config)
     )
 
-    poller = SubtitlePoller(run_js)
+    poller = subtitle_parser.SubtitlePoller(run_js)
     poller.direction_detected.connect(beacon.set_direction)
 
-    video_sync = VideoTimeSync(run_js)
+    video_sync = danmaku_overlay.VideoTimeSync(run_js)
     video_sync.time_updated.connect(danmaku.on_time_update)
     _danmaku_state = {"loaded_href": None}
 
+    # ------------------------------------------------------------------
+    # B 站弹幕设置同步
+    # ------------------------------------------------------------------
+    def _apply_bili_danmaku_settings():
+        result = run_js(bilibili_config.DANMAKU_SETTINGS_JS)
+        if not result:
+            return
+        try:
+            settings = json.loads(result)
+            danmaku.apply_bili_settings(settings)
+            print("[danmaku] 已同步 B 站弹幕设置")
+        except (json.JSONDecodeError, TypeError) as e:
+            print(f"[danmaku] 读取 B 站弹幕设置失败: {e}")
+
+    # ------------------------------------------------------------------
+    # UI 状态同步
+    # ------------------------------------------------------------------
     def _set_map_button(active):
         run_js(
             "window.__compassChrome && window.__compassChrome.setMapActive("
@@ -476,14 +489,20 @@ def run_qt(controller, config):
             or ""
         )
 
+    # ------------------------------------------------------------------
+    # 窗口选择 / 地图 / 弹幕切换
+    # ------------------------------------------------------------------
     def _pick_window():
-        dlg = WindowPickerDialog(exclude_titles=(WINDOW_TITLE,))
+        dlg = window_picker.WindowPickerDialog(exclude_titles=(WINDOW_TITLE,))
         dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.selected_hwnd:
             return
         if not manager.attach_to_window(dlg.selected_hwnd):
             print("[overlay] 目标窗口无效，未能挂载")
             return
+        controller.window_picked = True
+        controller.map_active = False
+        controller.danmaku_active = False
         video_sync.stop()
         _set_map_button(False)
         _set_danmaku_button(False)
@@ -495,29 +514,38 @@ def run_qt(controller, config):
         if not manager.is_attached():
             return
         new_state = not beacon.is_enabled()
+        controller.map_active = new_state
         beacon.set_enabled(new_state)
         manager.restack()
         _set_map_button(new_state)
+        if new_state:
+            run_js(bilibili_config.ENABLE_SUBTITLE_JS)
 
     def _toggle_danmaku_mapping():
         if not manager.is_attached():
             return
         if danmaku.is_enabled():
+            controller.danmaku_active = False
             danmaku.set_enabled(False)
             video_sync.stop()
             _set_danmaku_button(False)
             return
         href = _current_href()
+        controller.danmaku_active = True
         danmaku.set_enabled(True)
         manager.restack()
         _set_danmaku_button(True)
-        video_sync.start(known_bvid=bilibili_danmaku.extract_bvid(href))
+        video_sync.start(known_bvid=bilibili_danmaku.extract_bvid(_current_href()))
+        _apply_bili_danmaku_settings()
         if _danmaku_state["loaded_href"] != href:
             _danmaku_state["loaded_href"] = href
             danmaku.load_items([])
             _fetch_danmaku_async(href)
 
     def _on_target_lost():
+        controller.window_picked = False
+        controller.map_active = False
+        controller.danmaku_active = False
         video_sync.stop()
         _set_map_button(False)
         _set_danmaku_button(False)
@@ -527,8 +555,10 @@ def run_qt(controller, config):
         print("[overlay] 目标窗口已关闭或最小化，已自动解绑")
 
     manager.target_lost.connect(_on_target_lost)
-    video_sync.video_changed.connect(_on_video_changed)
 
+    # ------------------------------------------------------------------
+    # Bridge 信号连接
+    # ------------------------------------------------------------------
     bridge.navigate_requested.connect(lambda url: _navigate(controller, url))
     bridge.settings_requested.connect(
         lambda: _open_settings(controller, config, hotkeys)
@@ -581,14 +611,14 @@ def main():
 
     config = config_module.load_config()
     controller = Controller()
-    controller.hint_text = build_hint_text(config["hotkeys"])
+    controller.hint_text = webview_chrome.build_hint_text(config["hotkeys"])
 
     qt_thread = threading.Thread(target=run_qt, args=(controller, config), daemon=True)
     qt_thread.start()
     controller.qt_ready.wait(timeout=10)
 
     geo = config["window_geometry"]
-    api = Api(lambda: controller.bridge)
+    api = webview_chrome.Api(lambda: controller.bridge)
     start_url = config.get("last_url") or config["start_url"]
     window = webview.create_window(
         WINDOW_TITLE,
@@ -613,7 +643,15 @@ def main():
 
     def on_loaded(*args):
         try:
-            window.evaluate_js(build_chrome_js(controller.hint_text))
+            window.evaluate_js(webview_chrome.build_chrome_js(controller.hint_text))
+            restore_js = (
+                "if(window.__compassChrome){"
+                f"window.__compassChrome.setWindowPicked({'true' if controller.window_picked else 'false'});"
+                f"window.__compassChrome.setMapActive({'true' if controller.map_active else 'false'});"
+                f"window.__compassChrome.setDanmakuActive({'true' if controller.danmaku_active else 'false'});"
+                "}"
+            )
+            window.evaluate_js(restore_js)
             current = window.get_current_url()
             window.evaluate_js(
                 "window.__compassChrome && window.__compassChrome.setUrl("
@@ -632,7 +670,6 @@ def main():
     window.events.moved += lambda *a: _save_geometry()
 
     def on_closed(*args):
-        controller.window = None
         config_module.save_config(config)
         _request_quit(controller)
 

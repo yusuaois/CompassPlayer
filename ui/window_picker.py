@@ -49,7 +49,7 @@ _user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)
 _user32.GetDpiForWindow.restype = wintypes.UINT
 _user32.GetDpiForWindow.argtypes = [wintypes.HWND]
 
-# WinEventHook：目标窗口移动/缩放时立即收到通知，overlay 零延迟跟随
+# WinEventHook：目标窗口移动/缩放时立即收到通知
 WINEVENTPROC = ctypes.WINFUNCTYPE(
     None,
     wintypes.HANDLE,
