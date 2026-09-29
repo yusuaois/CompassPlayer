@@ -20,7 +20,7 @@ def app_dir():
 CONFIG_PATH = os.path.join(app_dir(), "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "1.1.0",
+    "version": "1.2.0",
     "hotkeys": {
         "play_pause": "`",
         "seek_backward": "5",
@@ -42,11 +42,13 @@ DEFAULT_CONFIG = {
         "font_scale": 1.0,
         "opacity": 0.9,
         "speed": 1.0,
-        "cross_seconds": 8.0,   # 基准过屏时间（秒），实际 = 该值 / speed
+        "cross_seconds": 8.0,  # 基准过屏时间（秒），实际 = 该值 / speed
         "max_lanes": 14,
-        "fixed_seconds": 4.0,   # 顶部/底部弹幕停留时间（秒）
-        "display_area": 0.34,   # 滚动/顶部弹幕限定在窗口最上面这一比例区域（1.0=不限）
-        "tick_ms": 8,          # 弹幕动画刷新间隔（毫秒）
+        "fixed_seconds": 4.0,  # 顶部/底部弹幕停留时间（秒）
+        "display_area": 0.34,  # 滚动/顶部弹幕限定在窗口最上面这一比例区域（1.0=不限）
+        "tick_ms": 16,  # 弹幕动画刷新间隔（毫秒）
+        "max_per_second": 3,  # 每秒最多显示的弹幕条数；高密度时段其余弹幕跳过
+        "max_active": 18,  # 同时显示的弹幕条数上限；高密度时段其余弹幕跳过
     },
     "start_url": "https://www.bilibili.com",
 }

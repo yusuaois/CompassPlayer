@@ -19,7 +19,7 @@ import threading
 from ctypes import wintypes
 
 import webview
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QDialog
 from webview.errors import WebViewException
 
@@ -444,15 +444,22 @@ def run_qt(controller, config):
     # B 站弹幕设置同步
     # ------------------------------------------------------------------
     def _apply_bili_danmaku_settings():
+        if not danmaku.is_enabled():
+            return
+
         result = run_js(bilibili_config.DANMAKU_SETTINGS_JS)
         if not result:
             return
         try:
             settings = json.loads(result)
             danmaku.apply_bili_settings(settings)
-            print("[danmaku] 已同步 B 站弹幕设置")
+            # print("[danmaku] 已同步 B 站弹幕设置")
         except (json.JSONDecodeError, TypeError) as e:
             print(f"[danmaku] 读取 B 站弹幕设置失败: {e}")
+
+    settings_sync_timer = QTimer()
+    settings_sync_timer.timeout.connect(_apply_bili_danmaku_settings)
+    settings_sync_timer.start(2000)
 
     # ------------------------------------------------------------------
     # UI 状态同步
@@ -588,6 +595,7 @@ def run_qt(controller, config):
 
     def _shutdown():
         mouse_hook.stop()
+        settings_sync_timer.stop()
         try:
             video_sync.stop()
             manager.shutdown()
