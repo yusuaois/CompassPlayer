@@ -62,17 +62,17 @@ class BeaconOverlay(QWidget):
         self._drag_offset = None
         self._active_handle = None
         self._current_angle = None
+        self._marker = QSvgRenderer(MARKER_PATH)
+        self._compass = QPixmap(COMPASS_PATH)
 
     # ------------------------------------------------------------------
     # 由 OverlayManager 调用的生命周期接口
     # ------------------------------------------------------------------
-    def on_attach(self, rect):
-        self._target_rect = rect
-        self._apply_geometry()
-
     def on_target_moved(self, rect):
         self._target_rect = rect
         self._apply_geometry()
+
+    on_attach = on_target_moved  # 指南针对挂载与目标窗口移动的处理相同
 
     def on_detach(self):
         self._target_rect = None
@@ -133,7 +133,7 @@ class BeaconOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         if self._collapsed:
-            self._paint_compass(painter)
+            painter.drawPixmap(self.rect(), self._compass)
             return
 
         rect = self.rect().adjusted(
@@ -167,7 +167,7 @@ class BeaconOverlay(QWidget):
             target = QRectF(
                 px - MARKER_SIZE / 2, py - MARKER_SIZE / 2, MARKER_SIZE, MARKER_SIZE
             )
-            QSvgRenderer(MARKER_PATH).render(painter, target)
+            self._marker.render(painter, target)
 
         # 编辑模式：红色虚线边框 + 四角缩放手柄
         if self._edit_mode:
@@ -179,9 +179,6 @@ class BeaconOverlay(QWidget):
             painter.setBrush(QBrush(QColor(255, 60, 60)))
             for handle_rect in self._handle_rects().values():
                 painter.drawRect(handle_rect)
-
-    def _paint_compass(self, painter: QPainter):
-        painter.drawPixmap(self.rect(), QPixmap(COMPASS_PATH))
 
     # ------------------------------------------------------------------
     # 缩放手柄区域（四个角）
@@ -244,33 +241,14 @@ class BeaconOverlay(QWidget):
         super().mouseReleaseEvent(event)
 
     def _resize_by_handle(self, handle: str, global_pos: QPoint):
+        """拖动角点缩放：对角点固定不动，被拖动的角点跟随鼠标"""
         geo = self.geometry()
-
-        if handle == "bottom_right":
-            self._apply_and_remember(
-                geo.x(), geo.y(), global_pos.x() - geo.x(), global_pos.y() - geo.y()
-            )
-        elif handle == "top_left":
-            self._apply_and_remember(
-                global_pos.x(),
-                global_pos.y(),
-                geo.right() - global_pos.x(),
-                geo.bottom() - global_pos.y(),
-            )
-        elif handle == "top_right":
-            self._apply_and_remember(
-                geo.x(),
-                global_pos.y(),
-                global_pos.x() - geo.x(),
-                geo.bottom() - global_pos.y(),
-            )
-        elif handle == "bottom_left":
-            self._apply_and_remember(
-                global_pos.x(),
-                geo.y(),
-                geo.right() - global_pos.x(),
-                global_pos.y() - geo.y(),
-            )
+        left, top = handle.endswith("left"), handle.startswith("top")
+        x = global_pos.x() if left else geo.x()
+        y = global_pos.y() if top else geo.y()
+        right = geo.right() if left else global_pos.x()
+        bottom = geo.bottom() if top else global_pos.y()
+        self._apply_and_remember(x, y, right - x, bottom - y)
 
     def _apply_and_remember(self, x, y, w, h):
         """将拖动/缩放结果夹在目标窗口范围内，应用并更新相对位置记录"""

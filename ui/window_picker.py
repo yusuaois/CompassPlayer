@@ -1,14 +1,16 @@
 """
 window_picker.py
 -----------------
-纯 ctypes 实现的 Win32 顶层窗口枚举 / 几何查询 / 点击穿透工具，
+Win32 顶层窗口枚举 / 客户区几何（换算为 Qt 逻辑坐标）/ 点击穿透 / WinEventHook 工具，
 以及"选择映射目标窗口"的弹窗
 """
 
 import ctypes
 from ctypes import wintypes
+from typing import NamedTuple
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -20,36 +22,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-_user32 = ctypes.windll.user32
-
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-_user32.EnumWindows.restype = wintypes.BOOL
-_user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
-_user32.IsWindowVisible.restype = wintypes.BOOL
-_user32.IsWindowVisible.argtypes = [wintypes.HWND]
-_user32.IsWindow.restype = wintypes.BOOL
-_user32.IsWindow.argtypes = [wintypes.HWND]
-_user32.IsIconic.restype = wintypes.BOOL
-_user32.IsIconic.argtypes = [wintypes.HWND]
-_user32.GetWindowTextLengthW.restype = ctypes.c_int
-_user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-_user32.GetWindowTextW.restype = ctypes.c_int
-_user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-_user32.GetWindow.restype = wintypes.HWND
-_user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
-_user32.GetWindowLongW.restype = ctypes.c_long
-_user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
-_user32.SetWindowLongW.restype = ctypes.c_long
-_user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
-_user32.GetClientRect.restype = wintypes.BOOL
-_user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-_user32.ClientToScreen.restype = wintypes.BOOL
-_user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
-_user32.GetDpiForWindow.restype = wintypes.UINT
-_user32.GetDpiForWindow.argtypes = [wintypes.HWND]
-
-# WinEventHook：目标窗口移动/缩放时立即收到通知
+# WinEventHook：目标窗口移动/缩放、前台窗口切换时立即收到通知
 WINEVENTPROC = ctypes.WINFUNCTYPE(
     None,
     wintypes.HANDLE,
@@ -60,8 +34,29 @@ WINEVENTPROC = ctypes.WINFUNCTYPE(
     wintypes.DWORD,
     wintypes.DWORD,
 )
-_user32.SetWinEventHook.restype = wintypes.HANDLE
-_user32.SetWinEventHook.argtypes = [
+
+_user32 = ctypes.WinDLL("user32")
+
+
+def _declare(name, restype, *argtypes):
+    func = getattr(_user32, name)
+    func.restype, func.argtypes = restype, list(argtypes)
+
+
+_declare("EnumWindows", wintypes.BOOL, WNDENUMPROC, wintypes.LPARAM)
+_declare("IsWindowVisible", wintypes.BOOL, wintypes.HWND)
+_declare("IsWindow", wintypes.BOOL, wintypes.HWND)
+_declare("IsIconic", wintypes.BOOL, wintypes.HWND)
+_declare("GetWindowTextLengthW", ctypes.c_int, wintypes.HWND)
+_declare("GetWindowTextW", ctypes.c_int, wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+_declare("GetWindow", wintypes.HWND, wintypes.HWND, wintypes.UINT)
+_declare("GetWindowLongW", ctypes.c_long, wintypes.HWND, ctypes.c_int)
+_declare("SetWindowLongW", ctypes.c_long, wintypes.HWND, ctypes.c_int, ctypes.c_long)
+_declare("GetClientRect", wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+_declare("ClientToScreen", wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.POINT))
+_declare(
+    "SetWinEventHook",
+    wintypes.HANDLE,
     wintypes.DWORD,
     wintypes.DWORD,
     wintypes.HANDLE,
@@ -69,23 +64,21 @@ _user32.SetWinEventHook.argtypes = [
     wintypes.DWORD,
     wintypes.DWORD,
     wintypes.DWORD,
-]
-_user32.UnhookWinEvent.restype = wintypes.BOOL
-_user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
-_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-_user32.GetWindowThreadProcessId.argtypes = [
+)
+_declare("UnhookWinEvent", wintypes.BOOL, wintypes.HANDLE)
+_declare(
+    "GetWindowThreadProcessId",
+    wintypes.DWORD,
     wintypes.HWND,
     ctypes.POINTER(wintypes.DWORD),
-]
-_user32.GetForegroundWindow.restype = wintypes.HWND
-_user32.GetForegroundWindow.argtypes = []
+)
+_declare("GetForegroundWindow", wintypes.HWND)
 
 GW_OWNER = 4
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_LAYERED = 0x00080000
-_BASE_DPI = 96.0
 
 EVENT_SYSTEM_FOREGROUND = 0x0003
 EVENT_OBJECT_LOCATIONCHANGE = 0x800B
@@ -95,11 +88,8 @@ CHILDID_SELF = 0
 
 
 def _get_title(hwnd) -> str:
-    length = _user32.GetWindowTextLengthW(hwnd)
-    if length == 0:
-        return ""
-    buf = ctypes.create_unicode_buffer(length + 1)
-    _user32.GetWindowTextW(hwnd, buf, length + 1)
+    buf = ctypes.create_unicode_buffer(_user32.GetWindowTextLengthW(hwnd) + 1)
+    _user32.GetWindowTextW(hwnd, buf, len(buf))
     return buf.value
 
 
@@ -112,16 +102,14 @@ def list_candidate_windows(exclude_titles=()):
     results = []
 
     def _cb(hwnd, _lparam):
-        if not _user32.IsWindowVisible(hwnd):
-            return True
-        if _user32.GetWindow(hwnd, GW_OWNER):
-            return True
-        if _user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW:
-            return True
-        title = _get_title(hwnd)
-        if not title or title in exclude:
-            return True
-        results.append((hwnd, title))
+        if (
+            _user32.IsWindowVisible(hwnd)
+            and not _user32.GetWindow(hwnd, GW_OWNER)
+            and not (_user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)
+        ):
+            title = _get_title(hwnd)
+            if title and title not in exclude:
+                results.append((hwnd, title))
         return True
 
     _user32.EnumWindows(WNDENUMPROC(_cb), 0)
@@ -129,43 +117,45 @@ def list_candidate_windows(exclude_titles=()):
 
 
 def is_window_usable(hwnd) -> bool:
-    if not hwnd:
-        return False
-    return bool(_user32.IsWindow(hwnd)) and not bool(_user32.IsIconic(hwnd))
+    return bool(_user32.IsWindow(hwnd)) and not _user32.IsIconic(hwnd)
 
 
-def get_window_dpi_scale(hwnd) -> float:
-    """返回目标窗口所在显示器的缩放比例（100% → 1.0）"""
-    try:
-        dpi = _user32.GetDpiForWindow(hwnd)
-    except OSError:
-        dpi = 0
-    return (dpi or _BASE_DPI) / _BASE_DPI
+def _native_to_logical_rect(x, y, w, h):
+    """Win32 物理像素矩形 → Qt 全局逻辑像素矩形"""
+    cx, cy = x + w / 2, y + h / 2
+
+    def gap(screen):
+        g, dpr = screen.geometry(), screen.devicePixelRatio()
+        dx = max(g.x() - cx, 0, cx - (g.x() + g.width() * dpr))
+        dy = max(g.y() - cy, 0, cy - (g.y() + g.height() * dpr))
+        return dx * dx + dy * dy
+
+    screen = min(QGuiApplication.screens(), key=gap)
+    origin, dpr = screen.geometry().topLeft(), screen.devicePixelRatio()
+    return (
+        round(origin.x() + (x - origin.x()) / dpr),
+        round(origin.y() + (y - origin.y()) / dpr),
+        round(w / dpr),
+        round(h / dpr),
+    )
 
 
-def get_window_client_rect_on_screen(hwnd):
-    """返回目标窗口客户区在屏幕坐标系下的 (x, y, width, height)；失败返回 None
+def get_window_client_rect_on_screen(hwnd) -> tuple[int, int, int, int] | None:
+    """返回目标窗口客户区在 Qt 全局逻辑坐标系下的 (x, y, width, height)；失败返回 None
 
     使用客户区（不含标题栏/边框）以精确对齐游戏渲染画面
     返回值已换算为 Qt 逻辑像素（QWidget.setGeometry 所需），而非 Win32 物理像素
     """
-    rect = wintypes.RECT()
-    if not _user32.GetClientRect(hwnd, ctypes.byref(rect)):
+    rect, pt = wintypes.RECT(), wintypes.POINT(0, 0)
+    if not (
+        _user32.GetClientRect(hwnd, ctypes.byref(rect))
+        and _user32.ClientToScreen(hwnd, ctypes.byref(pt))
+    ):
         return None
-    pt = wintypes.POINT(0, 0)
-    if not _user32.ClientToScreen(hwnd, ctypes.byref(pt)):
-        return None
-    w = rect.right - rect.left
-    h = rect.bottom - rect.top
+    w, h = rect.right - rect.left, rect.bottom - rect.top
     if w <= 0 or h <= 0:
         return None
-    scale = get_window_dpi_scale(hwnd)
-    return (
-        round(pt.x / scale),
-        round(pt.y / scale),
-        round(w / scale),
-        round(h / scale),
-    )
+    return _native_to_logical_rect(pt.x, pt.y, w, h)
 
 
 def set_click_through(hwnd, enable: bool):
@@ -178,20 +168,34 @@ def set_click_through(hwnd, enable: bool):
     _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
 
 
-class _EventHook:
-    """钩子句柄 + ctypes 回调对象的容器
+class _EventHook(NamedTuple):
+    """WinEvent 钩子句柄 + ctypes 回调对象
 
-    两者必须同时被持有：回调对象一旦被 GC 回收，系统触发钩子时会踩坏内存
+    回调对象必须与句柄同生命周期：被 GC 回收后系统再触发钩子会访问已释放的内存
     """
 
-    __slots__ = ("callback_ref", "hook")
-
-    def __init__(self, hook, callback_ref):
-        self.hook = hook
-        self.callback_ref = callback_ref
+    hook: int
+    callback_ref: object
 
 
-def install_location_hook(hwnd, on_move):
+def _install_event_hook(event, on_event, pid=0, tid=0):
+    """注册单个事件的 WinEventHook，仅转发窗口自身的事件；失败返回 None
+
+    on_event(hwnd) 在安装钩子的线程中被调用，该线程须运行消息循环
+    """
+
+    def _raw_callback(_hook, _event, hwnd, id_object, id_child, _id_thread, _time):
+        if id_object == OBJID_WINDOW and id_child == CHILDID_SELF:
+            on_event(hwnd)
+
+    callback_ref = WINEVENTPROC(_raw_callback)
+    hook = _user32.SetWinEventHook(
+        event, event, None, callback_ref, pid, tid, WINEVENT_OUTOFCONTEXT
+    )
+    return _EventHook(hook, callback_ref) if hook else None
+
+
+def install_location_hook(hwnd, on_move) -> _EventHook | None:
     """给指定窗口安装位置/大小变化钩子（EVENT_OBJECT_LOCATIONCHANGE）
 
     目标窗口移动或缩放时立即调用 on_move()（无参数，回调内自行查询最新矩形）
@@ -202,77 +206,30 @@ def install_location_hook(hwnd, on_move):
     if not tid:
         return None
 
-    def _raw_callback(_hook, event, ev_hwnd, id_object, id_child, _id_thread, _time):
-        if (
-            event == EVENT_OBJECT_LOCATIONCHANGE
-            and ev_hwnd == hwnd
-            and id_object == OBJID_WINDOW
-            and id_child == CHILDID_SELF
-        ):
-            try:
-                on_move()
-            except Exception as e:  # noqa: BLE001
-                print("[overlay] 位置变化回调出错:", e)
+    def _on_event(event_hwnd):
+        if event_hwnd == hwnd:
+            on_move()
 
-    callback_ref = WINEVENTPROC(_raw_callback)
-    hook = _user32.SetWinEventHook(
-        EVENT_OBJECT_LOCATIONCHANGE,
-        EVENT_OBJECT_LOCATIONCHANGE,
-        None,
-        callback_ref,
-        pid.value,
-        tid,
-        WINEVENT_OUTOFCONTEXT,
-    )
-    if not hook:
-        return None
-    return _EventHook(hook, callback_ref)
+    return _install_event_hook(EVENT_OBJECT_LOCATIONCHANGE, _on_event, pid.value, tid)
 
 
 def get_foreground_window():
     return _user32.GetForegroundWindow()
 
 
-def install_foreground_hook(on_change):
+def install_foreground_hook(on_change) -> _EventHook | None:
     """全局监听 EVENT_SYSTEM_FOREGROUND（任意窗口切换到前台）
 
     调用 on_change()（无参数），回调内用 get_foreground_window() 查当前前台窗口
     返回值 / 失败情况同 install_location_hook
     """
-
-    def _raw_callback(_hook, event, ev_hwnd, id_object, id_child, _id_thread, _time):
-        if (
-            event == EVENT_SYSTEM_FOREGROUND
-            and id_object == OBJID_WINDOW
-            and id_child == CHILDID_SELF
-        ):
-            try:
-                on_change()
-            except OSError as e:
-                print("[overlay] 前台窗口变化回调出错:", e)
-
-    callback_ref = WINEVENTPROC(_raw_callback)
-    hook = _user32.SetWinEventHook(
-        EVENT_SYSTEM_FOREGROUND,
-        EVENT_SYSTEM_FOREGROUND,
-        None,
-        callback_ref,
-        0,
-        0,
-        WINEVENT_OUTOFCONTEXT,
-    )
-    if not hook:
-        return None
-    return _EventHook(hook, callback_ref)
+    return _install_event_hook(EVENT_SYSTEM_FOREGROUND, lambda _hwnd: on_change())
 
 
 def uninstall_event_hook(event_hook):
-    if event_hook is None:
-        return
-    try:
+    """卸载钩子；须在安装它的线程调用，传入 None 时无操作"""
+    if event_hook is not None:
         _user32.UnhookWinEvent(event_hook.hook)
-    except OSError:
-        pass
 
 
 class WindowPickerDialog(QDialog):
@@ -282,7 +239,7 @@ class WindowPickerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("选择要贴上悬浮层的窗口")
         self.resize(360, 420)
-        self._exclude_titles = exclude_titles
+        self._exclude_titles = (*exclude_titles, self.windowTitle())
         self.selected_hwnd = None
 
         layout = QVBoxLayout(self)
@@ -293,7 +250,7 @@ class WindowPickerDialog(QDialog):
         )
 
         self._list = QListWidget()
-        self._list.itemDoubleClicked.connect(lambda _item: self.accept())
+        self._list.itemDoubleClicked.connect(self.accept)
         layout.addWidget(self._list)
 
         btn_row = QHBoxLayout()

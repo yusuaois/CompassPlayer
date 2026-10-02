@@ -59,7 +59,6 @@ _CHROME_JS_TEMPLATE = """
 
     var TOP_EPS = 4;
     var WIDE_RATIO = 0.5;
-    var FORCE_SELECTORS = [];
 
     var origTop = new Map();
 
@@ -82,15 +81,9 @@ _CHROME_JS_TEMPLATE = """
         if (rect.top < -TOP_EPS || rect.top > barHeight + TOP_EPS) { return false; }
         return true;
     }
-    function matchesForce(el) {
-        for (var i = 0; i < FORCE_SELECTORS.length; i++) {
-            try { if (el.matches && el.matches(FORCE_SELECTORS[i])) { return true; } } catch (e) {}
-        }
-        return false;
-    }
     function isCandidate(el) {
         if (!el || el.nodeType !== 1 || isOwn(el)) { return false; }
-        return looksLikeTopBar(el) || matchesForce(el);
+        return looksLikeTopBar(el);
     }
     function applyPush(el, base) {
         try {
@@ -193,19 +186,10 @@ _CHROME_JS_TEMPLATE = """
         },
         setHint: function (t) { hintEl.textContent = t; },
         setUrl: function (u) { urlEl.value = u; },
-        setWindowPicked: function (picked) {
-            mapBtn.style.display = picked ? 'block' : 'none';
-            danmakuBtn.style.display = picked ? 'block' : 'none';
-            if (!picked) {
-                mapBtn.style.background = '#3a3a3a';
-                danmakuBtn.style.background = '#3a3a3a';
-            }
-        },
-        setMapActive: function (active) {
-            mapBtn.style.background = active ? '#00a1d6' : '#3a3a3a';
-        },
-        setDanmakuActive: function (active) {
-            danmakuBtn.style.background = active ? '#00a1d6' : '#3a3a3a';
+        setState: function (picked, mapOn, danmakuOn) {
+            mapBtn.style.display = danmakuBtn.style.display = picked ? 'block' : 'none';
+            mapBtn.style.background = mapOn ? '#00a1d6' : '#3a3a3a';
+            danmakuBtn.style.background = danmakuOn ? '#00a1d6' : '#3a3a3a';
         }
     };
     document.addEventListener('click', function (e) {
@@ -236,31 +220,16 @@ class Api:
         self._bridge = bridge_getter
 
     def navigate(self, url):
-        b = self._bridge()
-        if b is not None:
-            b.navigate_requested.emit(url)
+        self._bridge().navigate_requested.emit(url)
 
     def open_settings(self):
-        b = self._bridge()
-        if b is not None:
-            b.settings_requested.emit()
-
-    def toggle_immersive(self):
-        b = self._bridge()
-        if b is not None:
-            b.immersive_requested.emit()
+        self._bridge().settings_requested.emit()
 
     def pick_window(self):
-        b = self._bridge()
-        if b is not None:
-            b.pick_window_requested.emit()
+        self._bridge().pick_window_requested.emit()
 
     def toggle_map_mapping(self):
-        b = self._bridge()
-        if b is not None:
-            b.map_toggle_requested.emit()
+        self._bridge().map_toggle_requested.emit()
 
     def toggle_danmaku_mapping(self):
-        b = self._bridge()
-        if b is not None:
-            b.danmaku_toggle_requested.emit()
+        self._bridge().danmaku_toggle_requested.emit()

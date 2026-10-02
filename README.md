@@ -15,7 +15,7 @@ CompassPlayer 是一款基于 Python、PySide6 和 `pywebview`（EdgeChromium）
 - **字幕变指南针**：识别 B 站 CC 字幕中的方向词，在目标窗口上实时显示对应方位。
 - **纯 Python 拉取弹幕**：后端直连 B 站 WBI 签名 Protobuf 分段接口，不依赖不稳定的前端 XHR 拦截；沿用浏览器登录 Cookie，覆盖整条视频时间轴。
 - **面向高密度弹幕的渲染**：使用预渲染 QPixmap、轨道碰撞检测和密度限制，减少弹幕重叠与卡顿。
-- **事件驱动的窗口跟随**：通过 Win32 WinEventHook 响应目标窗口移动和前台切换，无需轮询窗口状态；悬浮层全程点击穿透。
+- **事件驱动的窗口跟随**：通过 Win32 WinEventHook 响应目标窗口移动和前台切换，无需轮询窗口状态；弹幕层全程点击穿透。
 
 ## 🖥️ 运行环境
 
@@ -47,13 +47,13 @@ python main.py
 
 可在 **⚙ 设置** 中自定义。
 
-| 按键 | 功能 |
-| --- | --- |
-| `` ` ``（反引号） | 播放 / 暂停 |
-| 5 / 6 | 快退 / 快进（默认 ±5 秒） |
-| 7 / 8 | 降低 / 提高窗口透明度 |
-| 9 | 显示 / 隐藏窗口 |
-| 0 | 切换沉浸模式 |
+| 按键              | 功能                      |
+| ----------------- | ------------------------- |
+| `` ` ``（反引号） | 播放 / 暂停               |
+| 5 / 6             | 快退 / 快进（默认 ±5 秒） |
+| 7 / 8             | 降低 / 提高窗口透明度     |
+| 9                 | 显示 / 隐藏窗口           |
+| 0                 | 切换沉浸模式              |
 
 ## 🧭 指南针使用指南
 
@@ -76,7 +76,9 @@ python main.py
 
 弹幕显示参数可在 `config.json` 的 `danmaku` 节中调整，**修改后需重启生效**：
 
-`display_area`、`tick_ms`、`font_scale`、`opacity`、`speed`、`cross_seconds`、`fixed_seconds`。
+`tick_ms`、`cross_seconds`、`fixed_seconds`、`max_lanes`、`max_per_second`、`max_active`。
+
+`display_area`、`font_scale`、`opacity`、`speed` 在开启弹幕时会被 B 站播放器的弹幕设置覆盖（并随配置一起保存），请在 B 站播放器里调整。
 
 ## 🏗️ 悬浮层架构
 
@@ -89,32 +91,35 @@ python main.py
 
 ## ❓ 常见问题（FAQ）
 
-| 现象 | 处理方法 |
-| --- | --- |
-| 热键没反应，尤其是在游戏内 | 以管理员身份运行。 |
-| 抓不到字幕，或指南针不转 | B 站 DOM 可能更新了。在 F12 中检查字幕元素的 class，并更新 `bilibili_config.py` 中的 `SUBTITLE_SELECTOR`。 |
-| 注入工具栏与 B 站顶栏重叠 | B 站改版可能改变了固定顶栏结构；调整 `webview_chrome.py` 中「下移固定顶栏」的逻辑。 |
-| 拿不到弹幕 | 确认当前页面是带 BV 号的视频播放页。控制台报错包含服务端原始返回（如 `-352`），可据此更新 `bilibili_config.py` 中的 `DANMAKU_SEG_URL` / `WBI_MIXIN_TAB`。 |
-| 弹幕位置与目标窗口对不上 | 如果目标窗口使用非标准自绘边框，可在 `window_picker.get_window_client_rect_on_screen` 中做针对性调整。 |
-| overlay 完全不跟随目标窗口移动 | 确认游戏不是独占全屏模式；否则检查 `window_picker.install_location_hook` 是否注册成功。 |
+| 现象                           | 处理方法                                                                                                                                                  |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 热键没反应，尤其是在游戏内     | 以管理员身份运行。                                                                                                                                        |
+| 抓不到字幕，或指南针不转       | B 站 DOM 可能更新了。在 F12 中检查字幕元素的 class，并更新 `bilibili_config.py` 中的 `SUBTITLE_SELECTOR`。                                                |
+| 注入工具栏与 B 站顶栏重叠      | B 站改版可能改变了固定顶栏结构；调整 `webview_chrome.py` 中「下移固定顶栏」的逻辑。                                                                       |
+| 拿不到弹幕                     | 确认当前页面是带 BV 号的视频播放页。控制台报错包含服务端原始返回（如 `-352`），可据此更新 `bilibili_config.py` 中的 `DANMAKU_SEG_URL` / `WBI_MIXIN_TAB`。 |
+| 弹幕位置与目标窗口对不上       | 如果目标窗口使用非标准自绘边框，可在 `window_picker.get_window_client_rect_on_screen` 中做针对性调整。                                                    |
+| overlay 完全不跟随目标窗口移动 | 确认游戏不是独占全屏模式；否则检查 `window_picker.install_location_hook` 是否注册成功。                                                                   |
 
 ## 📁 项目结构
 
 ```text
 CompassPlayer/
-├── main.py             # 入口：WebView2 主线程 + Qt 后台线程
-├── webview_chrome.py   # 注入页面的顶部工具栏 + js_api 桥接
-├── config.py           # 默认配置、JSON 加载/保存
-├── bilibili_config.py  # B 站接口地址、请求头、CSS 选择器（改版时在此更新）
-├── hotkey_manager.py   # 全局热键（keyboard.hook）
-├── subtitle_parser.py  # 字幕轮询 + 方向词解析
-├── beacon_overlay.py   # 透明指南针悬浮窗
-├── danmaku_overlay.py  # 弹幕映射叠加层 + 视频播放进度轮询
-├── overlay_manager.py  # 统一调度两个子 overlay，事件驱动跟随目标窗口
-├── window_picker.py    # 目标窗口枚举/选择弹窗 + 点击穿透 + WinEventHook
-├── bilibili_danmaku.py # 直连 Protobuf 分段接口拉取/解析 B 站视频弹幕（含 WBI 签名）
-├── settings_dialog.py  # 按键设置弹窗
-├── assets/pictures/    # 方向标记图片
+├── main.py                 # 入口：WebView2 主线程 + Qt 后台线程
+├── config.py               # 默认配置、JSON 加载/保存
+├── bilibili/
+│   ├── bilibili_config.py  # B 站接口地址、请求头、CSS 选择器、页面 JS（改版时在此更新）
+│   ├── bilibili_danmaku.py # 直连 Protobuf 分段接口拉取/解析 B 站视频弹幕（含 WBI 签名）
+│   └── subtitle_parser.py  # 字幕轮询 + 方向词解析
+├── overlay/
+│   ├── overlay_manager.py  # 统一调度两个子 overlay，事件驱动跟随目标窗口
+│   ├── beacon_overlay.py   # 透明指南针悬浮窗
+│   └── danmaku_overlay.py  # 弹幕映射叠加层 + 视频播放进度轮询
+├── ui/
+│   ├── webview_chrome.py   # 注入页面的顶部工具栏 + js_api 桥接
+│   ├── hotkey_manager.py   # 全局热键（keyboard.hook）
+│   ├── settings_dialog.py  # 按键设置弹窗
+│   └── window_picker.py    # 目标窗口枚举/选择弹窗 + 点击穿透 + WinEventHook
+├── assets/pictures/        # 方向标记图片
 └── requirements.txt
 ```
 

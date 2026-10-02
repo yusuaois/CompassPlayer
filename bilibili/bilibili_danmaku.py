@@ -1,14 +1,10 @@
 """
 bilibili_danmaku.py
 --------------------
-直连 B 站 Protobuf 弹幕分段接口 (seg.so)，拉取指定视频的全部弹幕。
+直连 B 站 Protobuf 弹幕分段接口 (seg.so)，拉取指定视频的全部弹幕
 
-【协议说明】
-1. 依赖 WBI 签名机制（详见 bilibili_config.WBI_MIXIN_TAB）
-2. 使用轻量级手写 Protobuf 解码器，跳过官方 protobuf 依赖库
-   根据 B 站 dm.proto 规范：
-   - DmSegMobileReply (Tag 1 -> elems: DanmakuElem)
-   - DanmakuElem (Tag 2 -> progress, Tag 3 -> mode, Tag 4 -> font_size, Tag 5 -> color, Tag 7 -> content)
+接口需 WBI 签名（见 bilibili_config.WBI_MIXIN_TAB）；响应由手写的最小 Protobuf
+解码器解析，字段号取自 dm.proto 的 DmSegMobileReply / DanmakuElem
 """
 
 import functools
@@ -18,6 +14,7 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from hashlib import md5
 from operator import attrgetter
 from pathlib import PurePosixPath
@@ -51,33 +48,24 @@ _ELEM_COLOR = 5  # DanmakuElem.color (RGB24颜色)
 _ELEM_CONTENT = 7  # DanmakuElem.content (文本)
 
 
+@dataclass(slots=True, eq=False)
 class DanmakuItem:
-    """弹幕数据实体类，使用 __slots__ 优化上万条弹幕时的内存占用"""
+    """弹幕数据实体类，使用 slots 优化上万条弹幕时的内存占用"""
 
-    __slots__ = ("color", "font_size", "mode", "text", "time")
-
-    def __init__(self, time_s: float, mode: int, font_size: int, color: int, text: str):
-        self.time = time_s  # 视频内出现时间（秒）
-        self.mode = mode  # 弹幕模式
-        self.font_size = font_size  # 字号
-        self.color = color  # 24bit RGB 颜色值
-        self.text = text  # 文本内容
-
-
-def extract_bvid(url: str) -> str | None:
-    m = bilibili_config.BVID_RE.search(url or "")
-    return m.group(0) if m else None
-
-
-def extract_page_number(url: str) -> int:
-    m = bilibili_config.PAGE_RE.search(url or "")
-    return int(m.group(1)) if m else 1
+    time: float  # 视频内出现时间（秒）
+    mode: int  # 弹幕模式
+    font_size: int  # 字号
+    color: int  # 24bit RGB 颜色值
+    text: str  # 文本内容
 
 
 def video_key(url: str) -> tuple[str, int] | None:
     """根据播放页 URL 提取 (bvid, p)，以此判断是否切换了视频/分 P"""
-    bvid = extract_bvid(url)
-    return (bvid, extract_page_number(url)) if bvid else None
+    bvid = bilibili_config.BVID_RE.search(url)
+    if bvid is None:
+        return None
+    page = bilibili_config.PAGE_RE.search(url)
+    return bvid.group(0), (int(page.group(1)) if page else 1)
 
 
 # ---------------------------------------------------------------------------

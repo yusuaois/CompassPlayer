@@ -40,6 +40,32 @@ PAGE_RE = re.compile(r"[?&]p=(\d+)")
 # CC 字幕文本容器 CSS 选择器
 SUBTITLE_SELECTOR = ".bili-subtitle-x-subtitle-panel-text"
 
+
+# ---------------------------------------------------------------------------
+# 播放器 <video> 控制 / 状态读取
+# ---------------------------------------------------------------------------
+def _on_video(body: str) -> str:
+    """生成在播放器 <video> 元素上执行 body 的 JS（body 内以 v 引用该元素）"""
+    return (
+        "(function(){var v=document.querySelector('bwp-video')"
+        "||document.querySelector('video');" + body + "})();"
+    )
+
+
+PLAY_PAUSE_JS = _on_video(" if(v){ v.paused ? v.play() : v.pause(); }")
+
+# 返回 "currentTime|playing|href"，无 video 元素时返回空串
+VIDEO_STATE_JS = _on_video(
+    " if(!v) return '';"
+    " return v.currentTime.toFixed(3)+'|'+(v.paused?0:1)+'|'"
+    "+encodeURIComponent(document.location.href);"
+)
+
+
+def seek_js(delta: float) -> str:
+    return _on_video(f" if(v){{ v.currentTime += ({delta}); }}")
+
+
 # ---------------------------------------------------------------------------
 # 弹幕设置同步
 # ---------------------------------------------------------------------------
@@ -91,8 +117,8 @@ ENABLE_SUBTITLE_JS = (
     "var best=null,fb=null;"
     "for(var i=0;i<items.length;i++){"
     "var t=(items[i].textContent||'').trim();"
-    "if(!t||t==='\u5173\u95ed'||t.indexOf('\u8bbe\u7f6e')>=0)continue;"
-    "if(t.indexOf('\u4e2d\u6587')>=0){"
+    "if(!t||t==='关闭'||t.indexOf('设置')>=0)continue;"
+    "if(t.indexOf('中文')>=0){"
     "if(t.toUpperCase().indexOf('AI')>=0){best=items[i];break;}"
     "if(!fb)fb=items[i];"
     "}"

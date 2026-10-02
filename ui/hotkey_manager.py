@@ -22,13 +22,11 @@ class HotkeyManager(QObject):
 
     def __init__(self, config: dict):
         super().__init__()
-        self.config = config
         self._hook = None
         self._key_to_callback = {}
         self.apply_hotkeys(config)
 
     def apply_hotkeys(self, config: dict):
-        self.config = config
         hotkeys = config["hotkeys"]
         bindings = [
             (hotkeys["play_pause"], self.play_pause_triggered.emit),
@@ -39,22 +37,19 @@ class HotkeyManager(QObject):
             (hotkeys["toggle_visibility"], self.toggle_visibility_triggered.emit),
             (hotkeys["toggle_immersive"], self.toggle_immersive_triggered.emit),
         ]
-        self._key_to_callback = {}
-        for key, callback in bindings:
-            if key and key not in self._key_to_callback:
-                self._key_to_callback[keyboard.key_to_scan_codes(key)[0]] = callback
-        self._install_hook()
+        self._key_to_callback = {
+            keyboard.key_to_scan_codes(key)[0]: callback
+            for key, callback in bindings
+            if key
+        }
+        self._unhook()
+        if self._key_to_callback:
+            self._hook = keyboard.hook(self._on_event)
 
-    def _install_hook(self):
+    def _unhook(self):
         if self._hook is not None:
-            try:
-                keyboard.unhook(self._hook)
-            except KeyError:
-                pass
+            keyboard.unhook(self._hook)
             self._hook = None
-        if not self._key_to_callback:
-            return
-        self._hook = keyboard.hook(self._on_event)
 
     def _on_event(self, event):
         if event.event_type == keyboard.KEY_DOWN:
@@ -63,10 +58,5 @@ class HotkeyManager(QObject):
                 callback()
 
     def shutdown(self):
-        if self._hook is not None:
-            try:
-                keyboard.unhook(self._hook)
-            except KeyError:
-                pass
-        self._hook = None
+        self._unhook()
         self._key_to_callback.clear()

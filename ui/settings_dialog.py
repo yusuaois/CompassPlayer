@@ -88,8 +88,7 @@ class SettingsDialog(QDialog):
         hotkey_group = QGroupBox("全局快捷键（点击按钮后按下新按键即可重新绑定）")
         form = QFormLayout()
         for action, label_text in ACTION_LABELS.items():
-            current_key = config["hotkeys"].get(action, "")
-            btn = KeyCaptureButton(current_key)
+            btn = KeyCaptureButton(config["hotkeys"][action])
             btn.key_captured.connect(
                 lambda key, a=action: self._on_key_captured(a, key)
             )

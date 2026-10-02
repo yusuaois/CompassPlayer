@@ -20,7 +20,7 @@ def app_dir():
 CONFIG_PATH = os.path.join(app_dir(), "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "1.2.0",
+    "version": "1.2.1",
     "hotkeys": {
         "play_pause": "`",
         "seek_backward": "5",
@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
         "max_active": 18,  # 同时显示的弹幕条数上限；高密度时段其余弹幕跳过
     },
     "start_url": "https://www.bilibili.com",
+    "last_url": "",  # 最近一次访问的页面，启动时优先打开
 }
 
 

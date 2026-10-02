@@ -12,18 +12,22 @@ import bisect
 import math
 import time
 import urllib.parse
+from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 
-from bilibili import bilibili_danmaku
+from bilibili import bilibili_config
+from bilibili.bilibili_danmaku import (
+    BOTTOM_MODES,
+    REVERSE_MODES,
+    SCROLL_MODES,
+    SUPPORTED_MODES,
+    TOP_MODES,
+    video_key,
+)
 from ui.window_picker import set_click_through
-
-SCROLL_MODES = bilibili_danmaku.SCROLL_MODES
-REVERSE_MODES = bilibili_danmaku.REVERSE_MODES
-BOTTOM_MODES = bilibili_danmaku.BOTTOM_MODES
-TOP_MODES = bilibili_danmaku.TOP_MODES
 
 _FONT_PX_BY_SIZE = {18: 16, 25: 20, 36: 28}  # B 站字号档位 -> 参考像素（720p 基准）
 _REF_HEIGHT = 720
@@ -33,25 +37,6 @@ _SEEK_JUMP_THRESHOLD = 1.2  # 秒；轮询时间跳变超过此值视为拖动�
 _MIN_LANE_GAP = 0.4  # 秒；同一轨道前一条弹幕尾部完全入场后，再间隔该时长才放下一条
 _MAX_FIXED_SLOTS = 4  # 顶部 / 底部固定弹幕各自的最大行数
 _SHADOW = QColor(0, 0, 0, 220)
-
-_VIDEO_STATE_JS = (
-    "(function(){var v=document.querySelector('bwp-video')||document.querySelector('video');"
-    " if(!v) return '';"
-    " return v.currentTime.toFixed(3)+'|'+(v.paused?0:1)+'|'"
-    "+encodeURIComponent(document.location.href);})();"
-)
-
-
-def _map_bili_speedplus(raw) -> float:
-    """
-    将 B 站弹幕速度设置映射为浮点倍率
-    0.4, 0.7, 1.0, 1.3, 1.6
-    此处增加边界保护，防止异常值导致弹幕不动或飞出屏幕
-    """
-    try:
-        return max(0.1, min(3.0, float(raw)))
-    except (TypeError, ValueError):
-        return 1.0
 
 
 class VideoTimeSync(QObject):
@@ -76,17 +61,17 @@ class VideoTimeSync(QObject):
         self._timer.stop()
 
     def _poll(self):
-        result = self._run_js(_VIDEO_STATE_JS)
+        result = self._run_js(bilibili_config.VIDEO_STATE_JS)
         if not result:
             return
         try:
             t_str, playing_str, href_enc = result.split("|")
             current_time = float(t_str)
-        except (ValueError, AttributeError):
+        except ValueError:
             return
         href = urllib.parse.unquote(href_enc)
 
-        key = bilibili_danmaku.video_key(href)
+        key = video_key(href)
         if key and key != self._last_video_key:
             self._last_video_key = key
             self.video_changed.emit(href)
@@ -94,18 +79,16 @@ class VideoTimeSync(QObject):
         self.time_updated.emit(current_time, playing_str == "1")
 
 
+@dataclass(slots=True, eq=False)
 class _Sprite:
     """一条正在显示的弹幕：文字与阴影在生成时预渲染为 pixmap，每帧只贴图"""
 
-    __slots__ = ("expire_at", "pixmap", "reverse", "width", "x", "y")
-
-    def __init__(self, pixmap, width, x, y, reverse=False, expire_at=0.0):
-        self.pixmap = pixmap
-        self.width = width
-        self.x = x
-        self.y = y
-        self.reverse = reverse
-        self.expire_at = expire_at
+    pixmap: QPixmap
+    width: int
+    x: float
+    y: float
+    reverse: bool = False
+    expire_at: float = 0.0
 
 
 def _render_text(text, color, font, metrics, dpr):
@@ -130,7 +113,7 @@ def _render_text(text, color, font, metrics, dpr):
 class DanmakuOverlay(QWidget):
     def __init__(self, config: dict):
         super().__init__()
-        self.config = config
+        self._cfg = config["danmaku"]
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -166,14 +149,13 @@ class DanmakuOverlay(QWidget):
         self._last_tick_ts = None
 
         # 由 apply_bili_settings() 按用户的 B 站设置收窄
-        self._enabled_modes = frozenset(bilibili_danmaku.SUPPORTED_MODES)
+        self._enabled_modes = SUPPORTED_MODES
         self._color_enabled = True
+        self._last_settings = None
 
         self._tick_timer = QTimer(self)
         self._tick_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._tick_timer.timeout.connect(self._tick)
-        
-        self._last_settings_signature = None
 
     # ------------------------------------------------------------------
     # 由 OverlayManager 调用的生命周期接口
@@ -221,7 +203,7 @@ class DanmakuOverlay(QWidget):
                 self._click_through_applied = True
             self.raise_()
             self._last_tick_ts = time.monotonic()
-            self._tick_timer.start(int(self._dcfg()["tick_ms"]))
+            self._tick_timer.start(int(self._cfg["tick_ms"]))
         else:
             self._tick_timer.stop()
             self._scrolling.clear()
@@ -233,41 +215,37 @@ class DanmakuOverlay(QWidget):
     # ------------------------------------------------------------------
     def apply_bili_settings(self, settings: dict):
         """将 B 站 localStorage 中的弹幕偏好（bpx_player_profile.dmSetting）应用到本 overlay"""
-        if not settings:
+        if not settings or settings == self._last_settings:
             return
-        
-        signature = str(sorted(settings.items()))
-        if signature == self._last_settings_signature:
-            return
-        self._last_settings_signature = signature
-        
-        dcfg = self._dcfg()
+        self._last_settings = settings
 
         def put(src_key, dst_key, convert):
             raw = settings.get(src_key)
             if raw is None:
                 return
             try:
-                dcfg[dst_key] = convert(float(raw))
+                self._cfg[dst_key] = convert(float(raw))
             except (TypeError, ValueError):
                 pass
 
         put("opacity", "opacity", lambda v: max(0.1, min(1.0, v)))
         put("dmarea", "display_area", lambda v: max(0.05, min(1.0, v / 100)))
         put("fontsize", "font_scale", lambda v: max(0.5, min(2.0, v)))
-        put("speedplus", "speed", _map_bili_speedplus)
+        put("speedplus", "speed", lambda v: max(0.1, min(3.0, v)))
+
+        def on(key):  # B 站未提供该项时视为开启
+            return settings.get(key) is not False
 
         # typeTopBottom 是顶 / 底弹幕的总开关，typeTop / typeBottom 是各自的开关
-        both = settings.get("typeTopBottom") is not False
-        modes = set(bilibili_danmaku.SUPPORTED_MODES)
-        if settings.get("typeScroll") is False:
+        modes = SUPPORTED_MODES
+        if not on("typeScroll"):
             modes -= SCROLL_MODES | REVERSE_MODES
-        if not (both and settings.get("typeTop") is not False):
+        if not (on("typeTopBottom") and on("typeTop")):
             modes -= TOP_MODES
-        if not (both and settings.get("typeBottom") is not False):
+        if not (on("typeTopBottom") and on("typeBottom")):
             modes -= BOTTOM_MODES
-        self._enabled_modes = frozenset(modes)
-        self._color_enabled = settings.get("typeColor") is not False
+        self._enabled_modes = modes
+        self._color_enabled = on("typeColor")
 
         self._font_cache.clear()
         self._reflow_from(self._last_video_time)
@@ -290,18 +268,9 @@ class DanmakuOverlay(QWidget):
     # ------------------------------------------------------------------
     # 排版
     # ------------------------------------------------------------------
-    def _dcfg(self):
-        return self.config["danmaku"]
-
-    def _max_active(self):
-        try:
-            return max(1, int(self._dcfg().get("max_active", 18)))
-        except (TypeError, ValueError):
-            return 18
-
     def _font_px(self, bili_font_size):
         base = _FONT_PX_BY_SIZE.get(bili_font_size, 20)
-        scale = max(self.height(), 1) / _REF_HEIGHT * float(self._dcfg()["font_scale"])
+        scale = max(self.height(), 1) / _REF_HEIGHT * float(self._cfg["font_scale"])
         return max(10, round(base * scale))
 
     def _font(self, px):
@@ -318,16 +287,14 @@ class DanmakuOverlay(QWidget):
 
     def _scroll_speed(self):
         """滚动速度（逻辑像素 / 秒）：所有滚动弹幕同速，同轨道内不会追尾"""
-        speed = max(0.1, float(self._dcfg()["speed"]))
-        cross = max(1.0, float(self._dcfg()["cross_seconds"]) / speed)
+        speed = max(0.1, float(self._cfg["speed"]))
+        cross = max(1.0, float(self._cfg["cross_seconds"]) / speed)
         return max(self.width(), 1) / cross
 
     def _reset_layout(self):
-        area = max(0.05, min(1.0, float(self._dcfg()["display_area"])))
+        area = max(0.05, min(1.0, float(self._cfg["display_area"])))
         usable = max(1, round(self.height() * area))
-        lanes = max(
-            1, min(int(self._dcfg()["max_lanes"]), usable // self._lane_height())
-        )
+        lanes = max(1, min(int(self._cfg["max_lanes"]), usable // self._lane_height()))
         slots = min(_MAX_FIXED_SLOTS, lanes)
         self._scroll_lanes = [-math.inf] * lanes
         self._reverse_lanes = [-math.inf] * lanes
@@ -347,21 +314,13 @@ class DanmakuOverlay(QWidget):
 
     def _spawn_due(self, now):
         items = self._items
-
-        try:
-            max_per_second = max(
-                1,
-                int(self._dcfg().get("max_per_second", 3)),
-            )
-        except (TypeError, ValueError):
-            max_per_second = 3
+        max_per_second = max(1, int(self._cfg["max_per_second"]))
 
         while self._next_index < len(items) and items[self._next_index].time <= now:
             item = items[self._next_index]
             self._next_index += 1
 
             second = int(item.time)
-
             if second != self._density_second:
                 self._density_second = second
                 self._density_count = 0
@@ -369,15 +328,11 @@ class DanmakuOverlay(QWidget):
             if self._density_count >= max_per_second:
                 continue
 
-            # 超过这个时间才被轮询到，已经没有展示价值，避免集中补发。
+            # 超过这个时间才被轮询到，已经没有展示价值，避免集中补发
             if now - item.time > 0.5:
                 continue
 
-            if self._spawn_one(
-                item,
-                event_time=item.time,
-                video_now=now,
-            ):
+            if self._spawn_one(item, now):
                 self._density_count += 1
 
     @staticmethod
@@ -388,18 +343,16 @@ class DanmakuOverlay(QWidget):
                 return i
         return None
 
-    def _spawn_one(self, item, event_time, video_now):
-        if not item.text:
-            return False
-
-        if item.mode not in self._enabled_modes:
+    def _spawn_one(self, item, video_now):
+        if not item.text or item.mode not in self._enabled_modes:
             return False
 
         if not self._color_enabled and item.color != 0xFFFFFF:
             return False
 
-        # 无论每秒限制如何，始终保证同屏活跃弹幕总数有硬上限。
-        if len(self._scrolling) + len(self._fixed) >= self._max_active():
+        # 无论每秒限制如何，同屏活跃弹幕总数始终有硬上限
+        max_active = max(1, int(self._cfg["max_active"]))
+        if len(self._scrolling) + len(self._fixed) >= max_active:
             return False
 
         is_scroll = item.mode in SCROLL_MODES or item.mode in REVERSE_MODES
@@ -410,9 +363,8 @@ class DanmakuOverlay(QWidget):
         else:
             slots = self._top_slots if item.mode in TOP_MODES else self._bottom_slots
 
-        # 轨道分配使用“原始弹幕时间”，而不是轮询到的当前时间。
-        # 这样同一批迟到被轮询到的弹幕仍按视频时间正确避让。
-        index = self._take_free(slots, event_time)
+        # 轨道按弹幕原始时间分配（而非轮询到的时间），迟到的弹幕也能正确避让
+        index = self._take_free(slots, item.time)
         if index is None:
             return False
 
@@ -422,13 +374,8 @@ class DanmakuOverlay(QWidget):
             (item.color >> 8) & 0xFF,
             item.color & 0xFF,
         )
-
         pixmap, width = _render_text(
-            item.text,
-            color,
-            font,
-            metrics,
-            self.devicePixelRatioF(),
+            item.text, color, font, metrics, self.devicePixelRatioF()
         )
 
         lane_h = self._lane_height()
@@ -436,9 +383,8 @@ class DanmakuOverlay(QWidget):
         if is_scroll:
             speed_px = self._scroll_speed()
 
-            # VideoTimeSync 是周期性轮询，弹幕实际出现时可能已过去 0~300ms。
-            # 根据视频时间差补偿初始 X，避免所有弹幕固定晚半拍出现。
-            late_seconds = max(0.0, video_now - event_time)
+            # 轮询有 0~300ms 延迟，按视频时间差补偿初始 X，避免弹幕固定晚半拍出现
+            late_seconds = max(0.0, video_now - item.time)
 
             if reverse:
                 x = -float(width) + speed_px * late_seconds
@@ -450,22 +396,16 @@ class DanmakuOverlay(QWidget):
                     return False
 
             self._scrolling.append(
-                _Sprite(
-                    pixmap,
-                    width,
-                    x,
-                    index * lane_h + 2,
-                    reverse=reverse,
-                )
+                _Sprite(pixmap, width, x, index * lane_h + 2, reverse=reverse)
             )
 
-            # 前一条弹幕的尾部完全进入屏幕后，才能允许下一条进入相同轨道。
-            slots[index] = event_time + width / max(speed_px, 1.0) + _MIN_LANE_GAP
+            # 前一条弹幕的尾部完全进入屏幕后，才允许下一条进入相同轨道
+            slots[index] = item.time + width / max(speed_px, 1.0) + _MIN_LANE_GAP
 
         else:
-            expire_at = event_time + float(self._dcfg()["fixed_seconds"])
+            expire_at = item.time + float(self._cfg["fixed_seconds"])
 
-            # 固定弹幕如果已经过期，不再补发。
+            # 固定弹幕如果已经过期，不再补发
             if expire_at <= video_now:
                 return False
 
@@ -476,15 +416,7 @@ class DanmakuOverlay(QWidget):
 
             x = (self.width() - width) / 2
 
-            self._fixed.append(
-                _Sprite(
-                    pixmap,
-                    width,
-                    x,
-                    y,
-                    expire_at=expire_at,
-                )
-            )
+            self._fixed.append(_Sprite(pixmap, width, x, y, expire_at=expire_at))
             slots[index] = expire_at
 
         return True
@@ -510,8 +442,6 @@ class DanmakuOverlay(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setOpacity(max(0.1, min(1.0, float(self._dcfg()["opacity"]))))
-        for s in self._scrolling:
-            painter.drawPixmap(QPointF(s.x, s.y), s.pixmap)
-        for s in self._fixed:
+        painter.setOpacity(max(0.1, min(1.0, float(self._cfg["opacity"]))))
+        for s in (*self._scrolling, *self._fixed):
             painter.drawPixmap(QPointF(s.x, s.y), s.pixmap)

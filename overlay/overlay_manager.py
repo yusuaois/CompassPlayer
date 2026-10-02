@@ -8,9 +8,8 @@ overlay_manager.py
   set_enabled(bool) / is_enabled() -> bool
   on_focus_changed(bool)
 
-self.overlays 的顺序即渲染顺序（从下到上），目标窗口位置变化和前台切换
-均走 WinEventHook 事件通知，不轮询，"窗口被关掉"通过前台切换事件中的
-IsWindow/IsIconic 检查发现，无需单独轮询
+self.overlays 的顺序即渲染顺序（从下到上）；位置跟随与前台切换均由 WinEventHook
+事件驱动，目标窗口被关闭/最小化也在前台切换事件中发现
 """
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -27,11 +26,10 @@ from ui.window_picker import (
 
 class OverlayManager(QObject):
     target_lost = Signal()
-    target_attached = Signal()
 
     def __init__(self, beacon, danmaku):
         super().__init__()
-        # 渲染顺序从下到上：danmaku 先 raise，beacon 后 raise，指南针始终在弹幕之上
+        # 渲染顺序从下到上，指南针始终在弹幕之上
         self.beacon = beacon
         self.danmaku = danmaku
         self.overlays = [self.danmaku, self.beacon]
@@ -63,7 +61,6 @@ class OverlayManager(QObject):
 
         self._location_hook = install_location_hook(hwnd, self._on_hook_moved)
         self._sync_focus()
-        self.target_attached.emit()
         return True
 
     def detach(self):
