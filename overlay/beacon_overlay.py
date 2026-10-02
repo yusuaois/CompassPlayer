@@ -78,6 +78,7 @@ class BeaconOverlay(QWidget):
         self._target_rect = None
         self._enabled = False
         self._has_focus = False
+        self._edit_mode = False
         self._sync_visibility()
 
     def set_enabled(self, enabled: bool):
