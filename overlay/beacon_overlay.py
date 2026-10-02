@@ -75,11 +75,12 @@ class BeaconOverlay(QWidget):
     on_attach = on_target_moved  # 指南针对挂载与目标窗口移动的处理相同
 
     def on_detach(self):
+        if self._edit_mode:
+            self._toggle_edit_mode()
         self._target_rect = None
         self._enabled = False
         self._has_focus = False
-        self._edit_mode = False
-        self._sync_visibility()
+        self.hide()
 
     def set_enabled(self, enabled: bool):
         self._enabled = enabled
