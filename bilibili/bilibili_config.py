@@ -53,17 +53,9 @@ def _on_video(body: str) -> str:
     )
 
 
-# 优先模拟点击 B 站 UI 播放按钮；未找到按钮时回退直接操作 video 节点
-PLAY_PAUSE_JS = (
-    "(function(){"
-    "var btn=document.querySelector('.bpx-player-ctrl-play');"
-    "if(btn){"
-    "  btn.click();"
-    "}else{"
-    "  var v=document.querySelector('.bpx-player-video-area video')||document.querySelector('video');"
-    "  if(v){ v.paused ? v.play() : v.pause(); }"
-    "}"
-    "})()"
+# 直接操作 <video> 元素播放状态
+PLAY_PAUSE_JS = _on_video(
+    " if(v){ if(v.paused){ var p=v.play(); if(p&&p.catch) p.catch(function(){}); } else { v.pause(); } }"
 )
 
 # 返回 "currentTime|playing|href"，无 video 元素时返回空串
@@ -81,12 +73,6 @@ def seek_js(delta: float) -> str:
 # ---------------------------------------------------------------------------
 # 弹幕设置同步
 # ---------------------------------------------------------------------------
-# 从 bpx_player_profile.dmSetting 读取用户弹幕偏好
-# 字段名：
-#   dmarea     整数 0-100（即百分比，需 /100 转为 0.0-1.0）
-#   fontsize   浮点倍率，1.0 = 100%
-#   speedplus  速度倍率，1.0 = 适中
-#   typeScroll / typeTop / typeBottom / typeColor / typeTopBottom  布尔值
 DANMAKU_SETTINGS_JS = (
     "(function(){"
     "try{"
