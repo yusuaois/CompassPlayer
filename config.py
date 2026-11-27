@@ -20,7 +20,7 @@ def app_dir():
 CONFIG_PATH = os.path.join(app_dir(), "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "1.2.1",
+    "version": "1.2.2",
     "hotkeys": {
         "play_pause": "`",
         "seek_backward": "5",
