@@ -47,12 +47,24 @@ SUBTITLE_SELECTOR = ".bili-subtitle-x-subtitle-panel-text"
 def _on_video(body: str) -> str:
     """生成在播放器 <video> 元素上执行 body 的 JS（body 内以 v 引用该元素）"""
     return (
-        "(function(){var v=document.querySelector('bwp-video')"
+        "(function(){"
+        "var v=document.querySelector('.bpx-player-video-area video')"
         "||document.querySelector('video');" + body + "})();"
     )
 
 
-PLAY_PAUSE_JS = _on_video(" if(v){ v.paused ? v.play() : v.pause(); }")
+# 优先模拟点击 B 站 UI 播放按钮；未找到按钮时回退直接操作 video 节点
+PLAY_PAUSE_JS = (
+    "(function(){"
+    "var btn=document.querySelector('.bpx-player-ctrl-play');"
+    "if(btn){"
+    "  btn.click();"
+    "}else{"
+    "  var v=document.querySelector('.bpx-player-video-area video')||document.querySelector('video');"
+    "  if(v){ v.paused ? v.play() : v.pause(); }"
+    "}"
+    "})()"
+)
 
 # 返回 "currentTime|playing|href"，无 video 元素时返回空串
 VIDEO_STATE_JS = _on_video(
